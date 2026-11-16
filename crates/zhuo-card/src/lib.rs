@@ -2,8 +2,10 @@
 
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
+use flate2::read::ZlibDecoder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Read;
 use std::path::Path;
 
 /// 统一后的角色卡字段
@@ -421,29 +423,87 @@ pub fn parse_card_bytes(bytes: &[u8]) -> Result<Value> {
 }
 
 fn parse_png_card(bytes: &[u8]) -> Result<Value> {
-    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
-    let reader = decoder.read_info().context("read PNG info")?;
-    let info = reader.info();
-
-    // 收集三类文本 chunk，tEXt 为 ST 默认，zTXt/iTXt 兼容
-    let mut chunks: Vec<(String, String)> = info
-        .uncompressed_latin1_text
-        .iter()
-        .map(|c| (c.keyword.clone(), c.text.clone()))
-        .collect();
-    for c in &info.compressed_latin1_text {
-        if let Ok(text) = c.get_text() {
-            chunks.push((c.keyword.clone(), text));
-        }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(anyhow!("not a PNG file"));
     }
-    for c in &info.utf8_text {
-        if let Ok(text) = c.get_text() {
-            chunks.push((c.keyword.clone(), text));
+    if bytes.len() < 8 {
+        return Err(anyhow!("PNG file too short"));
+    }
+
+    // 手动遍历整个 PNG 的所有 chunk，不依赖 read_info（它只读到第一个 IDAT 就停止）。
+    // tEXt/zTXt/iTXt 可以出现在 IDAT 之前或之后，因此必须扫描到 IEND。
+    let mut chunks: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut pos = 8usize;
+    while pos + 12 <= bytes.len() {
+        let len = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
+        let end = pos + 12 + len;
+        if end > bytes.len() {
+            break; // 非法长度，停止避免死循环
         }
+        let kind = &bytes[pos + 4..pos + 8];
+        let data = &bytes[pos + 8..pos + 8 + len];
+
+        match kind {
+            b"tEXt" => {
+                let sep = data.iter().position(|&b| b == 0).unwrap_or(len);
+                let keyword = String::from_utf8_lossy(&data[..sep]).to_string();
+                let text = data.get(sep + 1..).unwrap_or(&[]).to_vec();
+                chunks.push((keyword, text));
+            }
+            b"zTXt" => {
+                let sep = data.iter().position(|&b| b == 0).unwrap_or(len);
+                let keyword = String::from_utf8_lossy(&data[..sep]).to_string();
+                if sep + 2 <= len {
+                    if let Ok(decompressed) = decompress_zlib(&data[sep + 2..]) {
+                        chunks.push((keyword, decompressed.into_bytes()));
+                    }
+                }
+            }
+            b"iTXt" => {
+                let mut off = 0;
+                let sep = data[off..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(len - off);
+                let keyword = String::from_utf8_lossy(&data[off..off + sep]).to_string();
+                off += sep + 1;
+                if off + 2 > len {
+                    break;
+                }
+                let compression_flag = data[off];
+                off += 2; // skip compression_flag + compression_method
+                let lang_sep = data[off..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(len - off);
+                off += lang_sep + 1; // skip language tag
+                let tk_sep = data[off..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .unwrap_or(len - off);
+                off += tk_sep + 1; // skip translated keyword
+                let text = if off <= len {
+                    if compression_flag == 1 {
+                        decompress_zlib(&data[off..]).unwrap_or_default()
+                    } else {
+                        String::from_utf8_lossy(&data[off..]).to_string()
+                    }
+                } else {
+                    String::new()
+                };
+                chunks.push((keyword, text.into_bytes()));
+            }
+            _ => {}
+        }
+
+        if kind == b"IEND" {
+            break;
+        }
+        pos = end;
     }
 
     // 优先 chara(V1/V2) / ccv3(V3)，其次任意能解出 JSON 的 chunk
-    let ordered: Vec<&(String, String)> =
+    let ordered: Vec<&(String, Vec<u8>)> =
         chunks
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("chara") || k.eq_ignore_ascii_case("ccv3"))
@@ -452,27 +512,106 @@ fn parse_png_card(bytes: &[u8]) -> Result<Value> {
             }))
             .collect();
 
-    for (_, text) in ordered {
-        if let Some(v) = decode_chara_payload(text) {
+    let mut tried: Vec<String> = Vec::new();
+    for (keyword, _) in &ordered {
+        tried.push(keyword.clone());
+    }
+
+    for (_, text_bytes) in &ordered {
+        if let Some(v) = decode_chara_payload(text_bytes) {
             return Ok(v);
         }
     }
-    Err(anyhow!("no `chara` chunk with valid card JSON in PNG"))
+
+    if tried.is_empty() {
+        Err(anyhow!("no `chara` chunk with valid card JSON in PNG"))
+    } else {
+        Err(anyhow!(
+            "PNG 中找到文本 chunk {:?}，但均无法解出卡 JSON",
+            tried
+        ))
+    }
 }
 
-/// tEXt value 通常是 base64(JSON)，少数卡直接放 JSON
-fn decode_chara_payload(text: &str) -> Option<Value> {
-    if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(text.trim()) {
-        if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+fn decompress_zlib(data: &[u8]) -> Result<String> {
+    let mut d = ZlibDecoder::new(data);
+    let mut buf = Vec::new();
+    d.read_to_end(&mut buf)
+        .context("zlib decompress text chunk")?;
+    String::from_utf8(buf).context("decompressed text is not valid UTF-8")
+}
+
+/// tEXt value 通常是 base64(JSON)，少数卡直接放 JSON。
+/// 容错：STANDARD / URL_SAFE / URL_SAFE_NO_PAD base64，剔除空白与 BOM，
+/// 直接 JSON，Latin-1 兜底。
+fn decode_chara_payload(raw: &[u8]) -> Option<Value> {
+    // 先按 UTF-8 解读，失败则按 Latin-1 兜底
+    let text = std::str::from_utf8(raw)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|_| raw.iter().map(|&b| b as char).collect::<String>());
+
+    decode_payload_str(&text)
+}
+
+fn decode_payload_str(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    let no_bom = trimmed.strip_prefix('\u{FEFF}').unwrap_or(trimmed);
+
+    // a) STANDARD base64
+    if let Some(v) = try_base64_json(no_bom, &base64::engine::general_purpose::STANDARD) {
+        return Some(v);
+    }
+    // b) URL_SAFE / URL_SAFE_NO_PAD base64
+    if let Some(v) = try_base64_json(no_bom, &base64::engine::general_purpose::URL_SAFE) {
+        return Some(v);
+    }
+    if let Some(v) = try_base64_json(no_bom, &base64::engine::general_purpose::URL_SAFE_NO_PAD) {
+        return Some(v);
+    }
+    // c) 剔除所有空白与 BOM 后再尝试 base64
+    let stripped: String = no_bom
+        .chars()
+        .filter(|c| !matches!(c, '\r' | '\n' | '\t' | ' '))
+        .collect();
+    if stripped != no_bom && !stripped.is_empty() {
+        if let Some(v) = try_base64_json(&stripped, &base64::engine::general_purpose::STANDARD) {
+            return Some(v);
+        }
+        if let Some(v) = try_base64_json(&stripped, &base64::engine::general_purpose::URL_SAFE) {
+            return Some(v);
+        }
+        if let Some(v) =
+            try_base64_json(&stripped, &base64::engine::general_purpose::URL_SAFE_NO_PAD)
+        {
             return Some(v);
         }
     }
-    serde_json::from_str::<Value>(text.trim()).ok()
+    // d) 直接把文本当 JSON 解析
+    serde_json::from_str::<Value>(no_bom).ok()
+}
+
+fn try_base64_json<E: base64::Engine>(input: &str, engine: &E) -> Option<Value> {
+    let raw = engine.decode(input).ok()?;
+    try_json_from_bytes(&raw)
+}
+
+fn try_json_from_bytes(raw: &[u8]) -> Option<Value> {
+    // 先尝试 UTF-8
+    if let Ok(v) = serde_json::from_slice::<Value>(raw) {
+        return Some(v);
+    }
+    // Latin-1 -> UTF-8 兜底
+    let latin1: String = raw.iter().map(|&b| b as char).collect();
+    serde_json::from_str::<Value>(&latin1).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use flate2::write::ZlibEncoder;
+    use flate2::Compression;
+    use std::io::Write;
 
     fn v1() -> &'static str {
         r#"{"name":"苏菲","description":"冬堡学院的学生","first_mes":"要来串冰糖葫芦吗？","mes_example":"<START>"}"#
@@ -499,6 +638,50 @@ mod tests {
             writer.write_image_data(&[0, 0, 0, 255]).unwrap();
         }
         buf
+    }
+
+    /// 创建不带任何文本 chunk 的基础 PNG（1x1 RGBA）。
+    fn make_png_base() -> Vec<u8> {
+        let mut buf = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut buf, 1, 1);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut writer = enc.write_header().unwrap();
+            writer.write_image_data(&[0, 0, 0, 255]).unwrap();
+        }
+        buf
+    }
+
+    /// 在 IEND 之前插入原始 chunk 数据（即 IDAT 之后）。
+    fn insert_chunk_before_iend(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        let iend_pos = png.len() - 12; // IEND 始终是最后 12 字节
+        let chunk_len = (data.len() as u32).to_be_bytes();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&chunk_len);
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(data);
+        let mut h = crc32fast::Hasher::new();
+        h.update(kind);
+        h.update(data);
+        chunk.extend_from_slice(&h.finalize().to_be_bytes());
+        png.splice(iend_pos..iend_pos, chunk);
+    }
+
+    /// 在 IDAT 之后插入 tEXt 风格的文本 chunk：keyword\0 + text。
+    fn insert_text_chunk_after_idat(png: &mut Vec<u8>, kind: &[u8; 4], keyword: &str, text: &str) {
+        let mut data = Vec::new();
+        data.extend_from_slice(keyword.as_bytes());
+        data.push(0);
+        data.extend_from_slice(text.as_bytes());
+        insert_chunk_before_iend(png, kind, &data);
+    }
+
+    /// zlib 压缩。
+    fn compress_zlib(data: &[u8]) -> Vec<u8> {
+        let mut e = ZlibEncoder::new(Vec::new(), Compression::default());
+        e.write_all(data).unwrap();
+        e.finish().unwrap()
     }
 
     fn write_tmp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
@@ -664,37 +847,139 @@ mod tests {
             }
         });
         let png_bytes = make_png(Some(
-            &base64::engine::general_purpose::STANDARD.encode(v2_card.to_string())
+            &base64::engine::general_purpose::STANDARD.encode(v2_card.to_string()),
         ));
-        
+
         // 1. 读取并解析原始卡
-        let card = Card::from_json(parse_card_bytes(&png_bytes).unwrap()).expect("load original card");
-        println!("原始卡: name={}, desc={}, id={}", card.name, card.description, card.id);
+        let card =
+            Card::from_json(parse_card_bytes(&png_bytes).unwrap()).expect("load original card");
+        println!(
+            "原始卡: name={}, desc={}, id={}",
+            card.name, card.description, card.id
+        );
         assert_eq!(card.name, "苏菲PNG");
         assert!(card.description.contains("冬堡学院"));
-        
+
         // 2. 修改卡片
         let mut modified = card.clone();
         modified.name = "苏菲-修改版".to_string();
         modified.description = "修改后的描述：冬堡学院学生，验证写回功能。".to_string();
         modified.first_mes = "……要来串修改版冰糖葫芦吗？".to_string();
-        
+
         // 3. 写回 PNG
         let v2_json = modified.to_v2_json();
         let new_png = write_v2_png(&png_bytes, &v2_json).expect("write v2 png");
-        
+
         // 4. 验证写回的 PNG
         let verified = Card::from_json(parse_card_bytes(&new_png).unwrap()).unwrap();
-        println!("验证卡: name={}, desc={}, id={}", verified.name, verified.description, verified.id);
+        println!(
+            "验证卡: name={}, desc={}, id={}",
+            verified.name, verified.description, verified.id
+        );
         assert_eq!(verified.name, modified.name);
         assert_eq!(verified.description, modified.description);
         assert_eq!(verified.first_mes, modified.first_mes);
-        
+
         // 5. 验证原始文件未被破坏（重新读取原文件对比）
         let original_again = Card::from_json(parse_card_bytes(&png_bytes).unwrap()).unwrap();
         assert_eq!(original_again.name, card.name);
         assert_eq!(original_again.description, card.description);
-        
+
         println!("✅ 真实 SillyTavern 角色卡完整读写流程测试通过");
+    }
+
+    #[test]
+    fn parses_png_chara_after_idat() {
+        // chara tEXt chunk 写在 IDAT 之后 → 必须能解析（旧逻辑会因 read_info 停于 IDAT 而失败）
+        let b64 = base64::engine::general_purpose::STANDARD.encode(v2());
+        let mut png = make_png_base();
+        insert_text_chunk_after_idat(&mut png, b"tEXt", "chara", &b64);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "苏菲");
+        assert_eq!(c.description, "冬堡学院的学生");
+    }
+
+    #[test]
+    fn parses_png_ccv3_after_idat() {
+        // ccv3 (V3) tEXt chunk 写在 IDAT 之后 → 成功
+        let ccv3_json = serde_json::json!({
+            "name": "CCV3卡",
+            "description": "ccv3 在 IDAT 之后",
+            "first_mes": "你好",
+            "mes_example": ""
+        });
+        let b64 = base64::engine::general_purpose::STANDARD.encode(ccv3_json.to_string());
+        let mut png = make_png_base();
+        insert_text_chunk_after_idat(&mut png, b"tEXt", "ccv3", &b64);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "CCV3卡");
+    }
+
+    #[test]
+    fn parses_png_ztxt_chara_after_idat() {
+        // zTXt 压缩的 chara 写在 IDAT 之后 → 成功
+        let json = v2();
+        let compressed = compress_zlib(json.as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice(b"chara\0");
+        data.push(0); // compression method = 0
+        data.extend_from_slice(&compressed);
+        let mut png = make_png_base();
+        insert_chunk_before_iend(&mut png, b"zTXt", &data);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "苏菲");
+    }
+
+    #[test]
+    fn parses_png_itxt_chara_after_idat() {
+        // iTXt 压缩 + UTF-8 中文 chara 写在 IDAT 之后 → 成功
+        let json =
+            r#"{"name":"iTXt卡","description":"压缩+中文","first_mes":"你好","mes_example":""}"#;
+        let compressed = compress_zlib(json.as_bytes());
+        let mut data = Vec::new();
+        data.extend_from_slice(b"chara\0");
+        data.push(1); // compression flag = 1 (compressed)
+        data.push(0); // compression method = 0
+        data.extend_from_slice(b"\0"); // empty language tag
+        data.extend_from_slice(b"\0"); // empty translated keyword
+        data.extend_from_slice(&compressed);
+        let mut png = make_png_base();
+        insert_chunk_before_iend(&mut png, b"iTXt", &data);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "iTXt卡");
+        assert_eq!(c.description, "压缩+中文");
+    }
+
+    #[test]
+    fn parses_png_urlsafe_base64_after_idat() {
+        // URL-safe base64 chara 写在 IDAT 之后 → 成功
+        let json = v2();
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        let mut png = make_png_base();
+        insert_text_chunk_after_idat(&mut png, b"tEXt", "chara", &encoded);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "苏菲");
+    }
+
+    #[test]
+    fn parses_png_newline_base64_after_idat() {
+        // 带换行的 base64 chara 写在 IDAT 之后 → 成功（空白会被剔除）
+        let b64 = base64::engine::general_purpose::STANDARD.encode(v2());
+        let with_newlines = format!("{}\n{}\n{}", &b64[..32], &b64[32..64], &b64[64..]);
+        let mut png = make_png_base();
+        insert_text_chunk_after_idat(&mut png, b"tEXt", "chara", &with_newlines);
+        let c = Card::from_json(parse_card_bytes(&png).unwrap()).unwrap();
+        assert_eq!(c.name, "苏菲");
+    }
+
+    #[test]
+    fn png_without_chara_still_fails_with_clear_error() {
+        // 真正无卡的纯图片 → 仍报清晰错误
+        let png = make_png_base();
+        let err = parse_card_bytes(&png).unwrap_err().to_string();
+        assert!(
+            err.contains("no `chara` chunk") || err.contains("文本 chunk"),
+            "错误信息应清晰：{err}"
+        );
     }
 }
