@@ -109,7 +109,7 @@ impl Card {
                 .to_string()
         };
         let name = get("name");
-        if name.is_empty() {
+        if name.trim().is_empty() {
             return Err(anyhow!("card has no `name` field"));
         }
         let canonical = serde_json::to_string(&value).context("canonicalize card json")?;
@@ -645,5 +645,42 @@ mod tests {
         let card = Card::from_json(parse_card_bytes(&rewritten).unwrap()).unwrap();
         assert_eq!(card.name, "New");
         assert_eq!(card.first_mes, "hello");
+    }
+
+    #[test]
+    fn real_sillytavern_card_roundtrip() {
+        let png_path = "../../examples/sophie.png";
+        let png_bytes = std::fs::read(png_path).expect("read sophie.png");
+        
+        // 1. 读取并解析原始卡
+        let card = load_card(png_path).expect("load original card");
+        println!("原始卡: name={}, desc={}, id={}", card.name, card.description, card.id);
+        // 实际 sophie.png 里的 name 是 "苏菲PNG"
+        assert_eq!(card.name, "苏菲PNG");
+        assert!(card.description.contains("冬堡学院"));
+        
+        // 2. 修改卡片
+        let mut modified = card.clone();
+        modified.name = "苏菲-修改版".to_string();
+        modified.description = "修改后的描述：冬堡学院学生，验证写回功能。".to_string();
+        modified.first_mes = "……要来串修改版冰糖葫芦吗？".to_string();
+        
+        // 3. 写回 PNG
+        let v2_json = modified.to_v2_json();
+        let new_png = write_v2_png(&png_bytes, &v2_json).expect("write v2 png");
+        
+        // 4. 验证写回的 PNG
+        let verified = Card::from_json(parse_card_bytes(&new_png).unwrap()).unwrap();
+        println!("验证卡: name={}, desc={}, id={}", verified.name, verified.description, verified.id);
+        assert_eq!(verified.name, modified.name);
+        assert_eq!(verified.description, modified.description);
+        assert_eq!(verified.first_mes, modified.first_mes);
+        
+        // 5. 验证原始文件未被破坏（重新读取原文件对比）
+        let original_again = load_card(png_path).unwrap();
+        assert_eq!(original_again.name, card.name);
+        assert_eq!(original_again.description, card.description);
+        
+        println!("✅ 真实 SillyTavern 角色卡完整读写流程测试通过");
     }
 }

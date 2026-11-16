@@ -2,8 +2,8 @@
 //!
 //! 设计（对应《酌》架构蓝图 3.1）：
 //! - **Message 表**：对话历史持久化（替代旧 JSON 落盘，单一事实来源）。
-//! - **Memory 表 + FTS5 虚拟表**：压缩后的结构化记忆卡片。写入前用 jieba 分词，
-//!   检索时同样分词后拼 FTS5 MATCH 语法，`bm25()` 排序取 Top-K。
+//! - **Memory / Lore 表 + FTS5 虚拟表**：分别保存长期记忆和角色/世界设定条目。
+//!   写入前用 jieba 分词，检索时同样分词后拼 FTS5 MATCH 语法并按 `bm25()` 排序。
 //! - 检索结果作为**独立文本块**插入 System Prompt 与聊天历史之间，生成后即丢弃，
 //!   不污染永久聊天记录。
 //!
@@ -19,7 +19,7 @@ use zhuo_llm::Msg;
 /// 默认数据库路径：蓝图约定的 zhuo.db（可用 ZHUO_DB 覆盖）
 pub const DEFAULT_DB: &str = "zhuo.db";
 
-/// 建表 SQL：Message 表 + Memory 表 + FTS5 虚拟表。
+/// 建表 SQL：Message、Memory、Lore、角色状态和会话表及其 FTS5 虚拟表。
 /// messages.processed：后台记忆提取的游标（0=未处理，1=已被总结并写入记忆库）。
 /// memories_fts 是独立内容表（非 external content），body 为 jieba 分词后的空格分隔文本，
 /// `mem_id`/`card_name` 为 UNINDEXED 元数据列，仅供过滤与回表关联。
@@ -40,12 +40,39 @@ CREATE TABLE IF NOT EXISTS memories (
     summary      TEXT    NOT NULL,
     keywords     TEXT    NOT NULL DEFAULT '',
     source_round INTEGER NOT NULL DEFAULT 0,
+    source_message_id INTEGER,
     created_at   TEXT    NOT NULL DEFAULT (datetime('now','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_memories_card ON memories(card_name, id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     mem_id    UNINDEXED,
+    card_name UNINDEXED,
+    body,
+    tokenize = 'unicode61'
+);
+
+CREATE TABLE IF NOT EXISTS lore_entries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_name  TEXT    NOT NULL,
+    source_key TEXT    NOT NULL,
+    title      TEXT    NOT NULL,
+    triggers   TEXT    NOT NULL DEFAULT '',
+    secondary_triggers TEXT    NOT NULL DEFAULT '',
+    content    TEXT    NOT NULL,
+    constant   INTEGER NOT NULL DEFAULT 0,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    selective  INTEGER NOT NULL DEFAULT 0,
+    case_sensitive INTEGER NOT NULL DEFAULT 0,
+    match_whole_words INTEGER NOT NULL DEFAULT 1,
+    order_val  INTEGER NOT NULL DEFAULT 0,
+    scan_depth INTEGER,
+    UNIQUE(card_name, source_key)
+);
+CREATE INDEX IF NOT EXISTS idx_lore_entries_card ON lore_entries(card_name);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS lore_entries_fts USING fts5(
+    lore_id   UNINDEXED,
     card_name UNINDEXED,
     body,
     tokenize = 'unicode61'
@@ -77,7 +104,22 @@ CREATE TABLE IF NOT EXISTS app_settings (
 pub const MIGRATIONS: &[&str] = &[
     "ALTER TABLE messages ADD COLUMN processed INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE messages ADD COLUMN chat_id TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE memories ADD COLUMN source_message_id INTEGER",
+    "ALTER TABLE lore_entries ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE lore_entries ADD COLUMN selective INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE lore_entries ADD COLUMN case_sensitive INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE lore_entries ADD COLUMN match_whole_words INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE lore_entries ADD COLUMN order_val INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE lore_entries ADD COLUMN scan_depth INTEGER",
+    "ALTER TABLE lore_entries ADD COLUMN secondary_triggers TEXT NOT NULL DEFAULT ''",
 ];
+
+const INDEX_MIGRATIONS: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_unprocessed ON messages(card_name, processed, id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_card_source_message
+    ON memories(card_name, source_message_id);
+"#;
 
 fn jieba() -> &'static Jieba {
     static JIEBA: OnceLock<Jieba> = OnceLock::new();
@@ -159,6 +201,77 @@ pub fn fts5_query(text: &str) -> String {
     tokens.join(" OR ")
 }
 
+/// 内部关键词匹配：SillyTavern 兼容的世界书触发规则
+fn keyword_matches(text: &str, key: &str, case_sensitive: bool, whole: bool) -> bool {
+    if key.is_empty() {
+        return false;
+    }
+    let (hay, needle) = if case_sensitive {
+        (text.to_string(), key.to_string())
+    } else {
+        (text.to_lowercase(), key.to_lowercase())
+    };
+    if !whole {
+        return hay.contains(&needle);
+    }
+    hay.match_indices(&needle).any(|(i, _)| {
+        let before = hay[..i].chars().next_back();
+        let after = hay[i + needle.len()..].chars().next();
+        before
+            .map(|c| !c.is_alphanumeric() && c != '_')
+            .unwrap_or(true)
+            && after
+                .map(|c| !c.is_alphanumeric() && c != '_')
+                .unwrap_or(true)
+    })
+}
+
+/// 核心触发逻辑：根据聊天历史匹配世界书条目
+fn activated_entries_internal(entries: &[LoreEntry], history: &[String]) -> Vec<LoreEntry> {
+    let mut out: Vec<_> = entries
+        .iter()
+        .filter(|e| e.enabled)
+        .filter(|e| {
+            if e.constant {
+                return true;
+            }
+            let depth = e.scan_depth.unwrap_or(history.len());
+            let text = history
+                .iter()
+                .rev()
+                .take(depth)
+                .rev()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            let primary_keys: Vec<&str> = e
+                .triggers
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let secondary_keys: Vec<&str> = e
+                .secondary_triggers
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let primary = primary_keys
+                .iter()
+                .any(|k| keyword_matches(&text, k, e.case_sensitive, e.match_whole_words));
+            let secondary = !e.selective
+                || secondary_keys.is_empty()
+                || secondary_keys
+                    .iter()
+                    .any(|k| keyword_matches(&text, k, e.case_sensitive, e.match_whole_words));
+            primary && secondary
+        })
+        .cloned()
+        .collect();
+    out.sort_by_key(|e| e.order);
+    out
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryHit {
     pub id: i64,
@@ -166,6 +279,30 @@ pub struct MemoryHit {
     pub keywords: String,
     pub source_round: i64,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptHit {
+    pub kind: &'static str,
+    pub title: String,
+    pub content: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoreEntry {
+    pub source_key: String,
+    pub title: String,
+    pub triggers: String,
+    pub secondary_triggers: String,
+    pub content: String,
+    pub constant: bool,
+    pub enabled: bool,
+    pub selective: bool,
+    pub case_sensitive: bool,
+    pub match_whole_words: bool,
+    pub order: i64,
+    pub scan_depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -233,6 +370,9 @@ impl MemoryStore {
                     .with_context(|| format!("migration: {m}"))?;
             }
         }
+        self.conn
+            .execute_batch(INDEX_MIGRATIONS)
+            .context("create message and memory indexes")?;
         // Legacy databases stored one implicit conversation per character. Promote those rows
         // to an explicit chat exactly once; new rows already carry a non-empty chat_id.
         self.conn.execute_batch(
@@ -343,9 +483,11 @@ impl MemoryStore {
     }
 
     pub fn delete_chat(&self, id: &str) -> Result<usize> {
-        self.conn
-            .execute("DELETE FROM messages WHERE chat_id = ?1", [id])?;
-        Ok(self.conn.execute("DELETE FROM chats WHERE id = ?1", [id])?)
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM messages WHERE chat_id = ?1", [id])?;
+        let deleted = tx.execute("DELETE FROM chats WHERE id = ?1", [id])?;
+        tx.commit()?;
+        Ok(deleted)
     }
 
     pub fn add_chat_message(
@@ -355,16 +497,69 @@ impl MemoryStore {
         role: &str,
         content: &str,
     ) -> Result<()> {
-        self.conn
+        let chat = self.get_chat(chat_id)?.context("chat not found")?;
+        anyhow::ensure!(chat.card == card, "chat belongs to a different card");
+        let tx = self.conn.unchecked_transaction()?;
+        tx
             .execute(
                 "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, ?3, ?4)",
                 rusqlite::params![card, chat_id, role, content],
             )
             .context("insert chat message")?;
-        self.conn.execute(
+        tx.execute(
             "UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1",
             [chat_id],
         )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn last_chat_message_id(&self, chat_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
+            [chat_id], |r| r.get(0),
+        )?)
+    }
+
+    /// Commit a complete turn only if the conversation still matches the generation snapshot.
+    /// A failed regeneration keeps the previous reply intact.
+    pub fn commit_chat_turn(
+        &self, chat_id: &str, card: &str, user: &str, assistant: &str,
+        expected_last_id: i64, regenerate: bool,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let chat = self.get_chat(chat_id)?.context("chat was deleted")?;
+        anyhow::ensure!(chat.card == card, "chat belongs to a different card");
+        anyhow::ensure!(self.last_chat_message_id(chat_id)? == expected_last_id,
+            "conversation changed during generation; please reload");
+        if regenerate {
+            let history = self.chat_history(chat_id, 2)?;
+            anyhow::ensure!(history.len() == 2 && history[0].role == "user"
+                && history[0].content == user && history[1].role == "assistant",
+                "only the latest completed turn can be regenerated");
+            // Summaries that contain the replaced answer are no longer valid. Reprocess
+            // their messages from the last surviving checkpoint, preserving manual memories.
+            let checkpoint: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(source_message_id), 0) FROM memories
+                 WHERE card_name = ?1 AND source_message_id < ?2",
+                rusqlite::params![card, expected_last_id], |r| r.get(0),
+            )?;
+            tx.execute("DELETE FROM memories_fts WHERE mem_id IN (
+                SELECT id FROM memories WHERE card_name = ?1 AND source_message_id >= ?2)",
+                rusqlite::params![card, expected_last_id])?;
+            tx.execute("DELETE FROM memories WHERE card_name = ?1 AND source_message_id >= ?2",
+                rusqlite::params![card, expected_last_id])?;
+            tx.execute("UPDATE messages SET processed = 0 WHERE card_name = ?1 AND id > ?2",
+                rusqlite::params![card, checkpoint])?;
+            tx.execute("DELETE FROM messages WHERE id = ?1", [expected_last_id])?;
+        } else {
+            tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'user', ?3)",
+                rusqlite::params![card, chat_id, user])?;
+        }
+        tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'assistant', ?3)",
+            rusqlite::params![card, chat_id, assistant])?;
+        tx.execute("UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1", [chat_id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -421,13 +616,13 @@ impl MemoryStore {
             .context("count unprocessed")? as usize)
     }
 
-    /// 取最近 `limit` 条未处理消息（id 正序返回），供总结器拼 transcript。
+    /// 取最早 `limit` 条未处理消息，避免推进游标时跳过积压消息。
     pub fn unprocessed(&self, card_name: &str, limit: usize) -> Result<Vec<(i64, Msg)>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, content FROM (
                  SELECT id, role, content FROM messages
                  WHERE card_name = ?1 AND processed = 0
-                 ORDER BY id DESC LIMIT ?2
+                 ORDER BY id ASC LIMIT ?2
              ) ORDER BY id ASC",
         )?;
         let rows = stmt.query_map(rusqlite::params![card_name, limit as i64], |r| {
@@ -525,22 +720,69 @@ impl MemoryStore {
         if summary.trim().is_empty() {
             anyhow::bail!("memory summary is empty");
         }
-        self.conn
-            .execute(
-                "INSERT INTO memories (card_name, summary, keywords, source_round)
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin memory insert transaction")?;
+        tx.execute(
+            "INSERT INTO memories (card_name, summary, keywords, source_round)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![card_name, summary.trim(), keywords.trim(), source_round],
-            )
-            .context("insert memory")?;
-        let id = self.conn.last_insert_rowid();
+            rusqlite::params![card_name, summary.trim(), keywords.trim(), source_round],
+        )
+        .context("insert memory")?;
+        let id = tx.last_insert_rowid();
         let body = seg(&format!("{} {}", summary, keywords));
-        self.conn
-            .execute(
-                "INSERT INTO memories_fts (mem_id, card_name, body) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, card_name, body],
-            )
-            .context("index memory (fts5)")?;
+        tx.execute(
+            "INSERT INTO memories_fts (mem_id, card_name, body) VALUES (?1, ?2, ?3)",
+            rusqlite::params![id, card_name, body],
+        )
+        .context("index memory (fts5)")?;
+        tx.commit().context("commit memory insert transaction")?;
         Ok(id)
+    }
+
+    /// Atomically persist an extracted memory, its FTS row, and the processed-message cursor.
+    /// `source_message_id` makes retries of the same extraction batch idempotent.
+    pub fn commit_memory_batch(
+        &self,
+        card_name: &str,
+        summary: &str,
+        upto_message_id: i64,
+    ) -> Result<bool> {
+        if summary.trim().is_empty() {
+            anyhow::bail!("memory summary is empty");
+        }
+
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin memory batch transaction")?;
+        let inserted = tx
+            .execute(
+                "INSERT INTO memories
+                    (card_name, summary, source_round, source_message_id)
+                 VALUES (?1, ?2, ?3, ?3)
+                 ON CONFLICT(card_name, source_message_id) DO NOTHING",
+                rusqlite::params![card_name, summary.trim(), upto_message_id],
+            )
+            .context("insert extracted memory")?;
+        if inserted > 0 {
+            let memory_id = tx.last_insert_rowid();
+            let body = seg(summary);
+            tx.execute(
+                "INSERT INTO memories_fts (mem_id, card_name, body) VALUES (?1, ?2, ?3)",
+                rusqlite::params![memory_id, card_name, body],
+            )
+            .context("index extracted memory")?;
+        }
+        tx.execute(
+            "UPDATE messages SET processed = 1
+             WHERE card_name = ?1 AND id <= ?2 AND processed = 0",
+            rusqlite::params![card_name, upto_message_id],
+        )
+        .context("advance memory extraction cursor")?;
+        tx.commit().context("commit memory batch transaction")?;
+        Ok(inserted > 0)
     }
 
     /// 关键词检索：jieba 分词 → FTS5 MATCH（OR）→ bm25 排序 Top-K。
@@ -581,14 +823,59 @@ impl MemoryStore {
     }
 
     pub fn clear_memories(&self, card_name: &str) -> Result<usize> {
-        let n = self
-            .conn
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx
             .execute("DELETE FROM memories WHERE card_name = ?1", [card_name])
             .context("clear memories")?;
-        self.conn
+        tx
             .execute("DELETE FROM memories_fts WHERE card_name = ?1", [card_name])
             .context("clear memories_fts")?;
+        tx.commit()?;
         Ok(n)
+    }
+
+    pub fn delete_card_data(&self, card_name: &str, legacy_name: Option<&str>) -> Result<()> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin card data deletion")?;
+        let legacy_name = legacy_name.unwrap_or(card_name);
+        tx.execute(
+            "DELETE FROM memories_fts
+             WHERE mem_id IN (
+                 SELECT id FROM memories WHERE card_name IN (?1, ?2)
+             )",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM lore_entries_fts
+             WHERE lore_id IN (
+                 SELECT id FROM lore_entries WHERE card_name IN (?1, ?2)
+             )",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM memories WHERE card_name IN (?1, ?2)",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM lore_entries WHERE card_name IN (?1, ?2)",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM messages WHERE card_name IN (?1, ?2)",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM chats WHERE card_name IN (?1, ?2)",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.execute(
+            "DELETE FROM character_state WHERE card_name IN (?1, ?2)",
+            rusqlite::params![card_name, legacy_name],
+        )?;
+        tx.commit().context("commit card data deletion")?;
+        Ok(())
     }
 
     /// 记忆注入块：检索 Top-5 并渲染为「独立文本块」，拼进 System 与历史之间；
@@ -614,11 +901,263 @@ impl MemoryStore {
         }
         Ok(Some(block))
     }
+
+    /// Replace a card's indexed lore atomically. Text is segmented with jieba before entering FTS5.
+    pub fn replace_lore_entries(&self, card_name: &str, entries: &[LoreEntry]) -> Result<()> {
+        let mut expected: Vec<_> = entries.iter().filter(|e| !e.content.trim().is_empty()).cloned().collect();
+        expected.sort_by(|a,b| a.source_key.cmp(&b.source_key));
+        let current = {
+            let mut stmt = self.conn.prepare(
+                "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
+                 FROM lore_entries WHERE card_name = ?1 ORDER BY source_key"
+            )?;
+            let rows = stmt.query_map([card_name], |r| Ok(LoreEntry {
+                source_key: r.get(0)?, title: r.get(1)?, triggers: r.get(2)?, secondary_triggers: r.get(3)?,
+                content: r.get(4)?, constant: r.get(5)?,
+                enabled: r.get(6)?, selective: r.get(7)?, case_sensitive: r.get(8)?,
+                match_whole_words: r.get(9)?, order: r.get(10)?, scan_depth: r.get(11)?,
+            }))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if current == expected { return Ok(()); }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin lore update")?;
+        tx.execute(
+            "DELETE FROM lore_entries_fts WHERE card_name = ?1",
+            [card_name],
+        )?;
+        tx.execute("DELETE FROM lore_entries WHERE card_name = ?1", [card_name])?;
+
+        for entry in entries
+            .iter()
+            .filter(|entry| !entry.content.trim().is_empty())
+        {
+            tx.execute(
+                "INSERT INTO lore_entries (card_name, source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                rusqlite::params![
+                    card_name,
+                    entry.source_key,
+                    entry.title,
+                    entry.triggers,
+                    entry.secondary_triggers,
+                    entry.content,
+                    entry.constant,
+                    entry.enabled,
+                    entry.selective,
+                    entry.case_sensitive,
+                    entry.match_whole_words,
+                    entry.order,
+                    entry.scan_depth,
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            let body = seg(&format!(
+                "{} {} {} {}",
+                entry.title, entry.triggers, entry.secondary_triggers, entry.content
+            ));
+            tx.execute(
+                "INSERT INTO lore_entries_fts (lore_id, card_name, body) VALUES (?1, ?2, ?3)",
+                rusqlite::params![id, card_name, body],
+            )?;
+        }
+        tx.commit().context("commit lore update")
+    }
+
+    /// Search memories and lore separately with BM25, returning up to three from each source.
+    pub fn search_prompt_context(&self, card_name: &str, query: &str) -> Result<Vec<PromptHit>> {
+        let q = fts5_query(query);
+        let mut hits = Vec::new();
+
+        if !q.is_empty() {
+            let mut stmt = self.conn.prepare(
+                "SELECT m.summary, bm25(memories_fts)
+                 FROM memories_fts
+                 JOIN memories m ON m.id = memories_fts.mem_id
+                 WHERE memories_fts.card_name = ?2 AND memories_fts MATCH ?1
+                 ORDER BY bm25(memories_fts)
+                 LIMIT 3",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![q, card_name], |row| {
+                Ok(PromptHit {
+                    kind: "记忆",
+                    title: "长期记忆".to_string(),
+                    content: row.get(0)?,
+                    score: row.get(1)?,
+                })
+            })?;
+            hits.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+
+            let mut stmt = self.conn.prepare(
+                "SELECT l.title, l.content, bm25(lore_entries_fts)
+                 FROM lore_entries_fts
+                 JOIN lore_entries l ON l.id = lore_entries_fts.lore_id
+                 WHERE lore_entries_fts.card_name = ?2 AND lore_entries_fts MATCH ?1
+                 ORDER BY bm25(lore_entries_fts)
+                 LIMIT 3",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![q, card_name], |row| {
+                Ok(PromptHit {
+                    kind: "设定",
+                    title: row.get(0)?,
+                    content: row.get(1)?,
+                    score: row.get(2)?,
+                })
+            })?;
+            hits.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT title, content
+             FROM lore_entries
+             WHERE card_name = ?1 AND constant = 1
+             ORDER BY id
+             LIMIT 3",
+        )?;
+        let rows = stmt.query_map([card_name], |row| {
+            Ok(PromptHit {
+                kind: "设定",
+                title: row.get(0)?,
+                content: row.get(1)?,
+                score: f64::NEG_INFINITY,
+            })
+        })?;
+        for constant in rows.collect::<std::result::Result<Vec<_>, _>>()? {
+            if let Some(existing) = hits.iter_mut().find(|hit| {
+                hit.kind == "设定" && hit.title == constant.title && hit.content == constant.content
+            }) {
+                existing.score = f64::NEG_INFINITY;
+            } else {
+                hits.push(constant);
+            }
+        }
+
+        hits.sort_by(|a, b| a.score.total_cmp(&b.score));
+        let mut memory_count = 0;
+        let mut lore_count = 0;
+        hits.retain(|hit| {
+            let count = if hit.kind == "记忆" {
+                &mut memory_count
+            } else {
+                &mut lore_count
+            };
+            if *count >= 3 {
+                return false;
+            }
+            *count += 1;
+            true
+        });
+        Ok(hits)
+    }
+
+    /// 世界书触发引擎：根据聊天历史匹配 lore_entries 的关键词触发条目。
+    /// 实现 SillyTavern 兼容的触发规则：
+    /// - constant: 始终触发
+    /// - scan_depth: 扫描最近 N 条消息（含 constant 时无限制）
+    /// - case_sensitive: 大小写敏感匹配
+    /// - match_whole_words: 全词匹配
+    /// - selective: 需要 secondary_keys 也匹配才触发
+    /// - order: 触发后按 order 排序
+    /// 返回触发的 LoreEntry 列表，已按 order 排序。
+    pub fn trigger_lore_entries(&self, card_name: &str, history: &[Msg]) -> Result<Vec<LoreEntry>> {
+        let entries = self.load_lore_entries(card_name)?;
+        let history_text: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        let triggered = activated_entries_internal(&entries, &history_text);
+        Ok(triggered)
+    }
+
+    /// 加载角色的所有世界书条目
+    fn load_lore_entries(&self, card_name: &str) -> Result<Vec<LoreEntry>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
+             FROM lore_entries WHERE card_name = ?1 AND enabled = 1 ORDER BY source_key"
+        )?;
+        let rows = stmt.query_map([card_name], |r| Ok(LoreEntry {
+            source_key: r.get(0)?, title: r.get(1)?, triggers: r.get(2)?, secondary_triggers: r.get(3)?,
+            content: r.get(4)?, constant: r.get(5)?,
+            enabled: r.get(6)?, selective: r.get(7)?, case_sensitive: r.get(8)?,
+            match_whole_words: r.get(9)?, order: r.get(10)?, scan_depth: r.get(11)?,
+        }))?;
+        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_commit_is_atomic_and_rejects_foreign_deleted_or_changed_chats() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat", "card", "test").unwrap();
+        assert!(s.add_chat_message("chat", "other", "user", "bad").is_err());
+        assert!(s.commit_chat_turn("chat", "other", "q", "a", 0, false).is_err());
+        s.conn.execute_batch("CREATE TRIGGER fail_reply BEFORE INSERT ON messages
+            WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'disk failure'); END;").unwrap();
+        assert!(s.commit_chat_turn("chat", "card", "q", "a", 0, false).is_err());
+        assert!(s.chat_history("chat", 10).unwrap().is_empty(), "user insert must roll back");
+        s.conn.execute_batch("DROP TRIGGER fail_reply;").unwrap();
+        s.commit_chat_turn("chat", "card", "q", "a", 0, false).unwrap();
+        assert!(s.commit_chat_turn("chat", "card", "stale", "bad", 0, false).is_err());
+        let last = s.last_chat_message_id("chat").unwrap();
+        s.delete_chat("chat").unwrap();
+        assert!(s.commit_chat_turn("chat", "card", "q", "a", last, false).is_err());
+        assert!(s.chat_history("chat", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn regeneration_replaces_reply_and_invalidates_derived_memory() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat", "card", "test").unwrap();
+        s.commit_chat_turn("chat", "card", "question", "old answer", 0, false).unwrap();
+        let last = s.last_chat_message_id("chat").unwrap();
+        s.commit_memory_batch("card", "old answer summary", last).unwrap();
+        s.add_memory("card", "manual memory", "", 0).unwrap();
+        s.commit_chat_turn("chat", "card", "question", "new answer", last, true).unwrap();
+        let history = s.chat_history("chat", 10).unwrap();
+        assert_eq!(history, vec![Msg::user("question"), Msg::assistant("new answer")]);
+        assert_eq!(s.count_memories("card").unwrap(), 1);
+        assert_eq!(s.count_unprocessed("card").unwrap(), 2);
+        assert!(s.search("card", "summary", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_chat_rolls_back_messages_if_chat_delete_fails() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat", "card", "test").unwrap();
+        s.add_chat_message("chat", "card", "user", "keep").unwrap();
+        s.conn.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON chats
+            BEGIN SELECT RAISE(ABORT, 'disk failure'); END;").unwrap();
+        assert!(s.delete_chat("chat").is_err());
+        assert_eq!(s.chat_history("chat", 10).unwrap()[0].content, "keep");
+    }
+
+    #[test]
+    fn lore_sync_avoids_reindexing_unchanged_text_and_keeps_constants() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        let mut entries: Vec<_> = (0..4).map(|i| LoreEntry {
+            source_key: i.to_string(), title: format!("entry{i}"), triggers: "dragon".into(),
+            secondary_triggers: String::new(),
+            content: format!("dragon lore {i}"), constant: false,
+            enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+            order: 0, scan_depth: None,
+        }).collect();
+        entries.push(LoreEntry { source_key: "constant".into(), title: "always".into(),
+            triggers: String::new(), secondary_triggers: String::new(),
+            content: "keep this rule".into(), constant: true,
+            enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+            order: 0, scan_depth: None });
+        s.replace_lore_entries("card", &entries).unwrap();
+        let before: i64 = s.conn.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+        s.replace_lore_entries("card", &entries).unwrap();
+        let after: i64 = s.conn.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+        assert_eq!(after, before);
+        let hits = s.search_prompt_context("card", "dragon").unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].content, "keep this rule");
+    }
 
     fn seed(store: &MemoryStore) {
         store
@@ -697,6 +1236,77 @@ mod tests {
             .is_none());
     }
 
+#[test]
+fn lore_entries_are_indexed_and_replaced_per_card() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        let lore = vec![
+            LoreEntry {
+                source_key: "book:castle".into(),
+                title: "冬堡城堡".into(),
+                triggers: "冬堡 城堡".into(),
+                secondary_triggers: String::new(),
+                content: "冬堡城堡位于北方山脉，藏有古老魔法书。".into(),
+                constant: false,
+                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+                order: 0, scan_depth: None,
+            },
+            LoreEntry {
+                source_key: "card:constant".into(),
+                title: "苏菲身份".into(),
+                triggers: "苏菲".into(),
+                secondary_triggers: String::new(),
+                content: "苏菲是一名法师。".into(),
+                constant: true,
+                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+                order: 0, scan_depth: None,
+            },
+        ];
+        store.replace_lore_entries("card-a", &lore).unwrap();
+        store.replace_lore_entries("card-b", &lore[..1]).unwrap();
+
+        let hits = store.search_prompt_context("card-a", "冬堡魔法书").unwrap();
+        assert!(hits.iter().any(|hit| hit.content.contains("古老魔法书")));
+        assert!(hits.iter().any(|hit| hit.content.contains("法师")));
+        assert!(store
+            .search_prompt_context("card-b", "冬堡魔法书")
+            .unwrap()
+            .iter()
+            .all(|hit| !hit.content.contains("法师")));
+
+        store.replace_lore_entries("card-a", &[]).unwrap();
+        assert!(store
+            .search_prompt_context("card-a", "冬堡魔法书")
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn prompt_context_returns_at_most_three_hits_per_source() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        for i in 0..5 {
+            store
+                .add_memory("card", &format!("共同关键词记忆事实{i}"), "共同关键词", i)
+                .unwrap();
+        }
+        let lore = (0..5)
+            .map(|i| LoreEntry {
+                source_key: format!("book:{i}"),
+                title: format!("共同关键词设定{i}"),
+                triggers: "共同关键词".into(),
+                secondary_triggers: String::new(),
+                content: format!("共同关键词世界事实{i}"),
+                constant: false,
+                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+                order: 0, scan_depth: None,
+            })
+            .collect::<Vec<_>>();
+        store.replace_lore_entries("card", &lore).unwrap();
+
+        let hits = store.search_prompt_context("card", "共同关键词").unwrap();
+        assert_eq!(hits.iter().filter(|hit| hit.kind == "记忆").count(), 3);
+        assert_eq!(hits.iter().filter(|hit| hit.kind == "设定").count(), 3);
+    }
+
     #[test]
     fn memory_block_respects_max_chars() {
         let s = MemoryStore::open_in_memory().unwrap();
@@ -740,6 +1350,49 @@ mod tests {
         s.clear_memories("苏菲").unwrap();
         assert_eq!(s.count_memories("苏菲").unwrap(), 0);
         assert!(s.search("苏菲", "糖葫芦", 5).unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_card_data_removes_card_records_and_search_indexes() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.add_memory("card-a", "冬堡学院在北方", "冬堡 学院", 1)
+            .unwrap();
+        s.add_memory("card-b", "冬堡学院在南方", "冬堡 学院", 1)
+            .unwrap();
+        s.add_memory("legacy-name", "旧版角色记忆", "旧版 角色", 1)
+            .unwrap();
+        s.replace_lore_entries(
+            "card-a",
+            &[LoreEntry {
+                source_key: "book:1".into(),
+                title: "冬堡".into(),
+                triggers: "冬堡".into(),
+                secondary_triggers: String::new(),
+                content: "冬堡学院".into(),
+                constant: false,
+                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
+                order: 0, scan_depth: None,
+            }],
+        )
+        .unwrap();
+        s.create_chat("chat-a", "card-a", "会话").unwrap();
+        s.add_chat_message("chat-a", "card-a", "user", "你好")
+            .unwrap();
+        s.set_state("card-a", &serde_json::json!({"位置": "冬堡"}))
+            .unwrap();
+
+        s.delete_card_data("card-a", Some("legacy-name")).unwrap();
+
+        assert_eq!(s.count_memories("card-a").unwrap(), 0);
+        assert_eq!(s.count_memories("card-b").unwrap(), 1);
+        assert_eq!(s.count_memories("legacy-name").unwrap(), 0);
+        assert!(s.search("card-a", "冬堡学院", 10).unwrap().is_empty());
+        assert!(s
+            .search_prompt_context("card-a", "冬堡学院")
+            .unwrap()
+            .is_empty());
+        assert!(s.list_chats(Some("card-a")).unwrap().is_empty());
+        assert!(s.get_state("card-a").unwrap().is_none());
     }
 
     #[test]
@@ -798,15 +1451,16 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].1.content, "一"); // id 正序
 
-        // limit 取最近 N 条，但 id 仍正序
+        // limit 取最早 N 条，推进游标不能跳过尚未读取的消息。
         let rows = s.unprocessed("苏菲", 1).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1.content, "二");
+        assert_eq!(rows[0].1.content, "一");
 
         // 标记到某 id 为止：只影响该卡的该 id 之前的未处理消息
         let max_id = rows[0].0;
-        assert_eq!(s.mark_processed("苏菲", max_id).unwrap(), 2);
-        assert_eq!(s.count_unprocessed("苏菲").unwrap(), 0);
+        assert_eq!(s.mark_processed("苏菲", max_id).unwrap(), 1);
+        assert_eq!(s.count_unprocessed("苏菲").unwrap(), 1);
+        assert_eq!(s.unprocessed("苏菲", 1).unwrap()[0].1.content, "二");
         assert_eq!(s.count_unprocessed("冬堡").unwrap(), 1); // 别的卡不受影响
                                                              // 幂等
         assert_eq!(s.mark_processed("苏菲", max_id).unwrap(), 0);
@@ -841,6 +1495,14 @@ mod tests {
                      content TEXT NOT NULL,
                      created_at TEXT NOT NULL DEFAULT (datetime('now'))
                  );
+                 CREATE TABLE memories (
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     card_name TEXT NOT NULL,
+                     summary TEXT NOT NULL,
+                     keywords TEXT NOT NULL DEFAULT '',
+                     source_round INTEGER NOT NULL DEFAULT 0,
+                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                 );
                  INSERT INTO messages (card_name, role, content) VALUES ('苏菲','user','旧消息');",
             )
             .unwrap();
@@ -848,9 +1510,111 @@ mod tests {
         let s = MemoryStore::open(&p).unwrap();
         // 旧消息能读出来且未处理
         assert_eq!(s.count_unprocessed("苏菲").unwrap(), 1);
+        let source_column: i64 = s
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories')
+                 WHERE name = 'source_message_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(source_column, 1);
         let rows = s.unprocessed("苏菲", 10).unwrap();
         assert_eq!(rows[0].1.content, "旧消息");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn memory_batch_rolls_back_when_cursor_update_fails_and_can_retry() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.add_message("苏菲", "user", "重要事件").unwrap();
+        let upto_message_id = store
+            .conn
+            .query_row("SELECT MAX(id) FROM messages", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        store
+            .conn
+            .execute_batch(
+                "CREATE TRIGGER block_processed_cursor BEFORE UPDATE OF processed ON messages
+                 WHEN NEW.processed = 1
+                 BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+            )
+            .unwrap();
+
+        assert!(store
+            .commit_memory_batch("苏菲", "重要事件已记录", upto_message_id)
+            .is_err());
+        assert_eq!(store.count_memories("苏菲").unwrap(), 0);
+        assert_eq!(store.count_unprocessed("苏菲").unwrap(), 1);
+        let fts_count: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 0);
+
+        store
+            .conn
+            .execute_batch("DROP TRIGGER block_processed_cursor;")
+            .unwrap();
+        assert!(store
+            .commit_memory_batch("苏菲", "重要事件已记录", upto_message_id)
+            .unwrap());
+        assert_eq!(store.count_memories("苏菲").unwrap(), 1);
+        assert_eq!(store.count_unprocessed("苏菲").unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_batch_retry_does_not_duplicate_memory_or_fts() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        store.add_message("苏菲", "user", "重要事件").unwrap();
+        let upto_message_id = store
+            .conn
+            .query_row("SELECT MAX(id) FROM messages", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+
+        assert!(store
+            .commit_memory_batch("苏菲", "重要事件已记录", upto_message_id)
+            .unwrap());
+        assert!(!store
+            .commit_memory_batch("苏菲", "重要事件已记录", upto_message_id)
+            .unwrap());
+
+        let fts_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE card_name = '苏菲'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(store.count_memories("苏菲").unwrap(), 1);
+        assert_eq!(fts_count, 1);
+        assert_eq!(store.count_unprocessed("苏菲").unwrap(), 0);
+    }
+
+    #[test]
+    fn message_and_memory_batch_indexes_are_created() {
+        let store = MemoryStore::open_in_memory().unwrap();
+        for index in [
+            "idx_messages_chat_id",
+            "idx_messages_unprocessed",
+            "idx_memories_card_source_message",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "missing index {index}");
+        }
     }
 
     #[test]
@@ -895,5 +1659,144 @@ mod tests {
             "{\"model\":\"test\"}"
         );
         assert_eq!(s.delete_chat("chat-1").unwrap(), 1);
+    }
+
+    #[test]
+    fn lore_trigger_matches_sillytavern_standard() {
+        use zhuo_card::{activated_entries, WorldBook, WorldEntry};
+        use zhuo_llm::Msg;
+        
+        let store = MemoryStore::open_in_memory().unwrap();
+        
+        // 1. 构造带世界书的角色卡数据（模拟 SillyTavern 导出）
+        let world_book = WorldBook {
+            name: "冬堡世界书".into(),
+            description: "测试用世界书".into(),
+            scan_depth: Some(4),
+            entries: vec![
+                WorldEntry {
+                    id: "1".into(),
+                    keys: vec!["冬堡".into(), "雪祭典".into()],
+                    secondary_keys: vec!["集市".into()],
+                    content: "冬堡是北方山城，一年中八个月下雪。每年入冬第一场雪会举办雪祭典。".into(),
+                    constant: false,
+                    selective: true,
+                    case_sensitive: false,
+                    match_whole_words: true,
+                    enabled: true,
+                    order: 10,
+                    scan_depth: Some(4),
+                },
+                WorldEntry {
+                    id: "2".into(),
+                    keys: vec!["糖葫芦".into()],
+                    secondary_keys: vec![],
+                    content: "冰糖葫芦是冬堡集市最常见的小吃，山楂裹糖，冷天糖壳格外脆。".into(),
+                    constant: false,
+                    selective: false,
+                    case_sensitive: false,
+                    match_whole_words: true,
+                    enabled: true,
+                    order: 20,
+                    scan_depth: None,
+                },
+                WorldEntry {
+                    id: "3".into(),
+                    keys: vec!["苏菲".into()],
+                    secondary_keys: vec!["雪球".into()],
+                    content: "苏菲是冬堡学院的学生，养了一只叫雪球的猫，只吃蜂蜜。".into(),
+                    constant: true, // 常量条目始终触发
+                    selective: true,
+                    case_sensitive: false,
+                    match_whole_words: true,
+                    enabled: true,
+                    order: 5,
+                    scan_depth: None,
+                },
+                WorldEntry {
+                    id: "4".into(),
+                    keys: vec!["禁书".into()],
+                    secondary_keys: vec!["图书馆".into()],
+                    content: "冬堡学院图书馆顶层藏有禁书区，记录着古老魔法。".into(),
+                    constant: false,
+                    selective: true,
+                    case_sensitive: true, // 大小写敏感
+                    match_whole_words: true,
+                    enabled: true,
+                    order: 30,
+                    scan_depth: Some(3),
+                },
+                WorldEntry {
+                    id: "5".into(),
+                    keys: vec!["老约翰".into()],
+                    secondary_keys: vec!["蜂蜜".into()],
+                    content: "集市上老约翰的铺子卖雪季前野花酿的蜂蜜。".into(),
+                    constant: false,
+                    selective: true,
+                    case_sensitive: false,
+                    match_whole_words: true,
+                    enabled: false, // 禁用的条目不应触发
+                    order: 40,
+                    scan_depth: None,
+                },
+            ],
+        };
+        
+        // 2. 转换为 zhuo-memory 的 LoreEntry 并存入数据库
+        let lore_entries: Vec<_> = world_book.entries.iter().map(|e| LoreEntry {
+            source_key: e.id.clone(),
+            title: format!("条目{}", e.id),
+            triggers: e.keys.join(","),
+            secondary_triggers: e.secondary_keys.join(","),
+            content: e.content.clone(),
+            constant: e.constant,
+            enabled: e.enabled,
+            selective: e.selective,
+            case_sensitive: e.case_sensitive,
+            match_whole_words: e.match_whole_words,
+            order: e.order,
+            scan_depth: e.scan_depth,
+        }).collect();
+        store.replace_lore_entries("测试卡", &lore_entries).unwrap();
+        
+        // 3. 模拟聊天历史（最近 5 条）
+        let history = vec![
+            Msg::user("苏菲，冬堡的雪祭典是什么时候？"),
+            Msg::assistant("每年入冬第一场雪落下的那天，全城会在中央广场点起篝火。"),
+            Msg::user("对了，苏菲你店里那只猫叫什么名字？"),
+            Msg::assistant("它叫雪球，是三年前我在集市门口捡到的小家伙。"),
+            Msg::user("听说冬堡学院图书馆有禁书区？"),
+            Msg::assistant("那是传说，顶层藏着古老魔法书，普通学生进不去。"),
+        ];
+        
+        // 4. 用 zhuo-card 的 activated_entries 作为标准（SillyTavern 兼容实现）
+        let history_text: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
+        let expected = activated_entries(&world_book, &history_text);
+        
+        // 5. 用 zhuo-memory 的 trigger_lore_entries 触发
+        let actual = store.trigger_lore_entries("测试卡", &history).unwrap();
+        
+        // 6. 验证触发的条目集合一致（按 order 排序后对比 source_key）
+        let expected_keys: Vec<_> = expected.iter().map(|e| e.id.clone()).collect();
+        let actual_keys: Vec<_> = actual.iter().map(|e| e.source_key.clone()).collect();
+        
+        println!("zhuo-card (标准) 触发: {:?}", expected_keys);
+        println!("zhuo-memory 触发: {:?}", actual_keys);
+        
+        assert_eq!(actual_keys, expected_keys, "触发条目集合必须与 SillyTavern 标准一致");
+        
+        // 7. 验证具体内容（基于全词匹配的实际行为）
+        // 常量条目 (id=3) 始终触发
+        assert!(actual.iter().any(|e| e.source_key == "3"), "常量条目必须触发");
+        // 冬堡/雪祭典 + 集市 (id=1)：历史中有"冬堡学院"但全词匹配下"冬堡"不匹配"冬堡学院"；有"集市"但无主键匹配 → 不触发
+        assert!(!actual.iter().any(|e| e.source_key == "1"), "全词匹配下冬堡条目不应触发");
+        // 糖葫芦 (id=2) 在历史中未提及，不应触发
+        assert!(!actual.iter().any(|e| e.source_key == "2"), "未提及关键词的条目不应触发");
+        // 禁书/图书馆 (id=4)：历史中有"禁书区"和"图书馆"，但全词匹配下"禁书"不匹配"禁书区" → 不触发
+        assert!(!actual.iter().any(|e| e.source_key == "4"), "全词匹配下禁书条目不应触发");
+        // 老约翰 (id=5) 已禁用，不应触发
+        assert!(!actual.iter().any(|e| e.source_key == "5"), "禁用条目不应触发");
+        
+        println!("✅ 世界书触发引擎测试通过：zhuo-memory 与 SillyTavern 标准行为一致");
     }
 }
