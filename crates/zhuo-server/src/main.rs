@@ -7,14 +7,13 @@
 //!   ZHUO_CARDS_DIR  角色卡目录（默认 examples/）
 //!   ZHUO_WORLD      世界设定 JSON（默认 examples/world.json）
 //!   ZHUO_DB         SQLite 记忆库路径（默认 zhuo.db，蓝图低配轨）
-//!   ZHUO_MAX_CHARS  上下文字符上限（默认 12000）
 //!   ZHUO_PORT       监听端口（默认 1127）
 //!   ZHUO_NO_USAGE=1 不请求 stream_options.include_usage
 
 mod prompt;
 mod routes;
+pub mod services;
 mod state;
-mod summarize;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -110,8 +109,9 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/", get(routes::index))
-        .route("/api/cards", get(routes::cards))
+        .route("/api/cards", get(routes::cards).post(routes::create_card))
         .route("/api/cards/import", post(routes::import_card))
+        .route("/api/cards/:id", axum::routing::delete(routes::delete_card))
         .route("/api/cards/:id/export", get(routes::export_card))
         .route("/api/ollama/tags", get(routes::ollama_tags))
         .route("/api/compatibility", get(routes::compatibility))
@@ -141,9 +141,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/reset", post(routes::reset))
         .route(
             "/api/memories",
-            post(routes::add_memory).get(routes::search_memories),
+            post(routes::memory::add_memory).get(routes::memory::search_memories),
         )
-        .route("/api/summarize", post(routes::summarize))
+        .route("/api/summarize", post(routes::memory::summarize))
         .route("/api/state", get(routes::get_state).put(routes::set_state))
         .layer(middleware::from_fn(cors))
         .with_state(st);

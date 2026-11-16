@@ -131,7 +131,8 @@ impl Session {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let file = File::create(path).with_context(|| format!("create jsonl: {}", path.display()))?;
+        let file =
+            File::create(path).with_context(|| format!("create jsonl: {}", path.display()))?;
         let mut writer = BufWriter::new(file);
         for msg in &self.messages {
             let jsonl = JsonlMessage::from_msg(msg, Some(&self.card_name));
@@ -287,7 +288,7 @@ mod tests {
     #[test]
     fn jsonl_sillytavern_roundtrip() {
         let dir = tmp("jsonl_roundtrip");
-        
+
         // 1. 模拟 SillyTavern 导出的 JSONL 内容
         let jsonl_content = r#"{"role":"user","content":"苏菲，你店里那只总在书架上打盹的猫叫什么名字呀？","name":"User"}
 {"role":"assistant","content":"它叫雪球，是三年前我在集市门口捡到的小家伙。别看它懒，它只肯吃蜂蜜，别的什么都不碰。","name":"苏菲"}
@@ -297,30 +298,38 @@ mod tests {
         let jsonl_path = dir.join("chat.jsonl");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&jsonl_path, jsonl_content).unwrap();
-        
+
         // 2. 从 JSONL 加载
         let mut session = Session::load_from_jsonl("苏菲", &jsonl_path).unwrap();
         assert_eq!(session.card_name, "苏菲");
         assert_eq!(session.messages.len(), 4);
         assert_eq!(session.messages[0].role, "user");
-        assert_eq!(session.messages[0].content, "苏菲，你店里那只总在书架上打盹的猫叫什么名字呀？");
+        assert_eq!(
+            session.messages[0].content,
+            "苏菲，你店里那只总在书架上打盹的猫叫什么名字呀？"
+        );
         assert_eq!(session.messages[1].role, "assistant");
         assert!(session.messages[1].content.contains("雪球"));
-        
+
         // 3. 追加新消息
         session.messages.push(Msg::user("冬堡的雪祭典是什么时候？"));
-        session.messages.push(Msg::assistant("每年入冬第一场雪落下的那天，全城会在中央广场点起篝火。"));
-        
+        session.messages.push(Msg::assistant(
+            "每年入冬第一场雪落下的那天，全城会在中央广场点起篝火。",
+        ));
+
         // 4. 保存回 JSONL
         let output_path = dir.join("chat_output.jsonl");
         session.save_as_jsonl(&output_path).unwrap();
-        
+
         // 5. 验证保存的 JSONL 可读且内容正确
         let reloaded = Session::load_from_jsonl("苏菲", &output_path).unwrap();
         assert_eq!(reloaded.messages.len(), 6);
         assert_eq!(reloaded.messages[4].content, "冬堡的雪祭典是什么时候？");
-        assert_eq!(reloaded.messages[5].content, "每年入冬第一场雪落下的那天，全城会在中央广场点起篝火。");
-        
+        assert_eq!(
+            reloaded.messages[5].content,
+            "每年入冬第一场雪落下的那天，全城会在中央广场点起篝火。"
+        );
+
         // 6. 验证 JSONL 格式：每行都是有效 JSON
         let saved_content = std::fs::read_to_string(&output_path).unwrap();
         let lines: Vec<&str> = saved_content.trim().split('\n').collect();
@@ -330,7 +339,7 @@ mod tests {
             assert!(!parsed.role.is_empty());
             assert!(!parsed.content.is_empty());
         }
-        
+
         // 7. 测试 append_to_jsonl
         let append_path = dir.join("chat_append.jsonl");
         Session::append_to_jsonl(&append_path, &[Msg::user("追加测试")], "苏菲").unwrap();
@@ -339,7 +348,7 @@ mod tests {
         assert_eq!(appended.messages.len(), 2);
         assert_eq!(appended.messages[0].content, "追加测试");
         assert_eq!(appended.messages[1].content, "追加回复");
-        
+
         println!("✅ SillyTavern JSONL 完整读写测试通过");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -354,12 +363,12 @@ mod tests {
 "#;
         let jsonl_path = dir.join("chat.jsonl");
         std::fs::write(&jsonl_path, jsonl_content).unwrap();
-        
+
         let session = Session::load_from_jsonl("苏菲", &jsonl_path).unwrap();
         assert_eq!(session.messages.len(), 2);
         assert_eq!(session.messages[0].content, "你好");
         assert_eq!(session.messages[1].content, "你好！");
-        
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
