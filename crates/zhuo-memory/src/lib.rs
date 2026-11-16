@@ -500,12 +500,11 @@ impl MemoryStore {
         let chat = self.get_chat(chat_id)?.context("chat not found")?;
         anyhow::ensure!(chat.card == card, "chat belongs to a different card");
         let tx = self.conn.unchecked_transaction()?;
-        tx
-            .execute(
-                "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![card, chat_id, role, content],
-            )
-            .context("insert chat message")?;
+        tx.execute(
+            "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![card, chat_id, role, content],
+        )
+        .context("insert chat message")?;
         tx.execute(
             "UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1",
             [chat_id],
@@ -517,40 +516,59 @@ impl MemoryStore {
     pub fn last_chat_message_id(&self, chat_id: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
-            [chat_id], |r| r.get(0),
+            [chat_id],
+            |r| r.get(0),
         )?)
     }
 
     /// Commit a complete turn only if the conversation still matches the generation snapshot.
     /// A failed regeneration keeps the previous reply intact.
     pub fn commit_chat_turn(
-        &self, chat_id: &str, card: &str, user: &str, assistant: &str,
-        expected_last_id: i64, regenerate: bool,
+        &self,
+        chat_id: &str,
+        card: &str,
+        user: &str,
+        assistant: &str,
+        expected_last_id: i64,
+        regenerate: bool,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
         let chat = self.get_chat(chat_id)?.context("chat was deleted")?;
         anyhow::ensure!(chat.card == card, "chat belongs to a different card");
-        anyhow::ensure!(self.last_chat_message_id(chat_id)? == expected_last_id,
-            "conversation changed during generation; please reload");
+        anyhow::ensure!(
+            self.last_chat_message_id(chat_id)? == expected_last_id,
+            "conversation changed during generation; please reload"
+        );
         if regenerate {
             let history = self.chat_history(chat_id, 2)?;
-            anyhow::ensure!(history.len() == 2 && history[0].role == "user"
-                && history[0].content == user && history[1].role == "assistant",
-                "only the latest completed turn can be regenerated");
+            anyhow::ensure!(
+                history.len() == 2
+                    && history[0].role == "user"
+                    && history[0].content == user
+                    && history[1].role == "assistant",
+                "only the latest completed turn can be regenerated"
+            );
             // Summaries that contain the replaced answer are no longer valid. Reprocess
             // their messages from the last surviving checkpoint, preserving manual memories.
             let checkpoint: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(source_message_id), 0) FROM memories
                  WHERE card_name = ?1 AND source_message_id < ?2",
-                rusqlite::params![card, expected_last_id], |r| r.get(0),
+                rusqlite::params![card, expected_last_id],
+                |r| r.get(0),
             )?;
-            tx.execute("DELETE FROM memories_fts WHERE mem_id IN (
+            tx.execute(
+                "DELETE FROM memories_fts WHERE mem_id IN (
                 SELECT id FROM memories WHERE card_name = ?1 AND source_message_id >= ?2)",
-                rusqlite::params![card, expected_last_id])?;
-            tx.execute("DELETE FROM memories WHERE card_name = ?1 AND source_message_id >= ?2",
-                rusqlite::params![card, expected_last_id])?;
-            tx.execute("UPDATE messages SET processed = 0 WHERE card_name = ?1 AND id > ?2",
-                rusqlite::params![card, checkpoint])?;
+                rusqlite::params![card, expected_last_id],
+            )?;
+            tx.execute(
+                "DELETE FROM memories WHERE card_name = ?1 AND source_message_id >= ?2",
+                rusqlite::params![card, expected_last_id],
+            )?;
+            tx.execute(
+                "UPDATE messages SET processed = 0 WHERE card_name = ?1 AND id > ?2",
+                rusqlite::params![card, checkpoint],
+            )?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [expected_last_id])?;
         } else {
             tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'user', ?3)",
@@ -558,7 +576,10 @@ impl MemoryStore {
         }
         tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'assistant', ?3)",
             rusqlite::params![card, chat_id, assistant])?;
-        tx.execute("UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1", [chat_id])?;
+        tx.execute(
+            "UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1",
+            [chat_id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -827,8 +848,7 @@ impl MemoryStore {
         let n = tx
             .execute("DELETE FROM memories WHERE card_name = ?1", [card_name])
             .context("clear memories")?;
-        tx
-            .execute("DELETE FROM memories_fts WHERE card_name = ?1", [card_name])
+        tx.execute("DELETE FROM memories_fts WHERE card_name = ?1", [card_name])
             .context("clear memories_fts")?;
         tx.commit()?;
         Ok(n)
@@ -904,22 +924,38 @@ impl MemoryStore {
 
     /// Replace a card's indexed lore atomically. Text is segmented with jieba before entering FTS5.
     pub fn replace_lore_entries(&self, card_name: &str, entries: &[LoreEntry]) -> Result<()> {
-        let mut expected: Vec<_> = entries.iter().filter(|e| !e.content.trim().is_empty()).cloned().collect();
-        expected.sort_by(|a,b| a.source_key.cmp(&b.source_key));
+        let mut expected: Vec<_> = entries
+            .iter()
+            .filter(|e| !e.content.trim().is_empty())
+            .cloned()
+            .collect();
+        expected.sort_by(|a, b| a.source_key.cmp(&b.source_key));
         let current = {
             let mut stmt = self.conn.prepare(
                 "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
                  FROM lore_entries WHERE card_name = ?1 ORDER BY source_key"
             )?;
-            let rows = stmt.query_map([card_name], |r| Ok(LoreEntry {
-                source_key: r.get(0)?, title: r.get(1)?, triggers: r.get(2)?, secondary_triggers: r.get(3)?,
-                content: r.get(4)?, constant: r.get(5)?,
-                enabled: r.get(6)?, selective: r.get(7)?, case_sensitive: r.get(8)?,
-                match_whole_words: r.get(9)?, order: r.get(10)?, scan_depth: r.get(11)?,
-            }))?;
+            let rows = stmt.query_map([card_name], |r| {
+                Ok(LoreEntry {
+                    source_key: r.get(0)?,
+                    title: r.get(1)?,
+                    triggers: r.get(2)?,
+                    secondary_triggers: r.get(3)?,
+                    content: r.get(4)?,
+                    constant: r.get(5)?,
+                    enabled: r.get(6)?,
+                    selective: r.get(7)?,
+                    case_sensitive: r.get(8)?,
+                    match_whole_words: r.get(9)?,
+                    order: r.get(10)?,
+                    scan_depth: r.get(11)?,
+                })
+            })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
-        if current == expected { return Ok(()); }
+        if current == expected {
+            return Ok(());
+        }
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1060,6 +1096,7 @@ impl MemoryStore {
     /// - match_whole_words: 全词匹配
     /// - selective: 需要 secondary_keys 也匹配才触发
     /// - order: 触发后按 order 排序
+    ///
     /// 返回触发的 LoreEntry 列表，已按 order 排序。
     pub fn trigger_lore_entries(&self, card_name: &str, history: &[Msg]) -> Result<Vec<LoreEntry>> {
         let entries = self.load_lore_entries(card_name)?;
@@ -1074,12 +1111,22 @@ impl MemoryStore {
             "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
              FROM lore_entries WHERE card_name = ?1 AND enabled = 1 ORDER BY source_key"
         )?;
-        let rows = stmt.query_map([card_name], |r| Ok(LoreEntry {
-            source_key: r.get(0)?, title: r.get(1)?, triggers: r.get(2)?, secondary_triggers: r.get(3)?,
-            content: r.get(4)?, constant: r.get(5)?,
-            enabled: r.get(6)?, selective: r.get(7)?, case_sensitive: r.get(8)?,
-            match_whole_words: r.get(9)?, order: r.get(10)?, scan_depth: r.get(11)?,
-        }))?;
+        let rows = stmt.query_map([card_name], |r| {
+            Ok(LoreEntry {
+                source_key: r.get(0)?,
+                title: r.get(1)?,
+                triggers: r.get(2)?,
+                secondary_triggers: r.get(3)?,
+                content: r.get(4)?,
+                constant: r.get(5)?,
+                enabled: r.get(6)?,
+                selective: r.get(7)?,
+                case_sensitive: r.get(8)?,
+                match_whole_words: r.get(9)?,
+                order: r.get(10)?,
+                scan_depth: r.get(11)?,
+            })
+        })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }
@@ -1093,17 +1140,33 @@ mod tests {
         let s = MemoryStore::open_in_memory().unwrap();
         s.create_chat("chat", "card", "test").unwrap();
         assert!(s.add_chat_message("chat", "other", "user", "bad").is_err());
-        assert!(s.commit_chat_turn("chat", "other", "q", "a", 0, false).is_err());
-        s.conn.execute_batch("CREATE TRIGGER fail_reply BEFORE INSERT ON messages
-            WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'disk failure'); END;").unwrap();
-        assert!(s.commit_chat_turn("chat", "card", "q", "a", 0, false).is_err());
-        assert!(s.chat_history("chat", 10).unwrap().is_empty(), "user insert must roll back");
+        assert!(s
+            .commit_chat_turn("chat", "other", "q", "a", 0, false)
+            .is_err());
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_reply BEFORE INSERT ON messages
+            WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'disk failure'); END;",
+            )
+            .unwrap();
+        assert!(s
+            .commit_chat_turn("chat", "card", "q", "a", 0, false)
+            .is_err());
+        assert!(
+            s.chat_history("chat", 10).unwrap().is_empty(),
+            "user insert must roll back"
+        );
         s.conn.execute_batch("DROP TRIGGER fail_reply;").unwrap();
-        s.commit_chat_turn("chat", "card", "q", "a", 0, false).unwrap();
-        assert!(s.commit_chat_turn("chat", "card", "stale", "bad", 0, false).is_err());
+        s.commit_chat_turn("chat", "card", "q", "a", 0, false)
+            .unwrap();
+        assert!(s
+            .commit_chat_turn("chat", "card", "stale", "bad", 0, false)
+            .is_err());
         let last = s.last_chat_message_id("chat").unwrap();
         s.delete_chat("chat").unwrap();
-        assert!(s.commit_chat_turn("chat", "card", "q", "a", last, false).is_err());
+        assert!(s
+            .commit_chat_turn("chat", "card", "q", "a", last, false)
+            .is_err());
         assert!(s.chat_history("chat", 10).unwrap().is_empty());
     }
 
@@ -1111,13 +1174,19 @@ mod tests {
     fn regeneration_replaces_reply_and_invalidates_derived_memory() {
         let s = MemoryStore::open_in_memory().unwrap();
         s.create_chat("chat", "card", "test").unwrap();
-        s.commit_chat_turn("chat", "card", "question", "old answer", 0, false).unwrap();
+        s.commit_chat_turn("chat", "card", "question", "old answer", 0, false)
+            .unwrap();
         let last = s.last_chat_message_id("chat").unwrap();
-        s.commit_memory_batch("card", "old answer summary", last).unwrap();
+        s.commit_memory_batch("card", "old answer summary", last)
+            .unwrap();
         s.add_memory("card", "manual memory", "", 0).unwrap();
-        s.commit_chat_turn("chat", "card", "question", "new answer", last, true).unwrap();
+        s.commit_chat_turn("chat", "card", "question", "new answer", last, true)
+            .unwrap();
         let history = s.chat_history("chat", 10).unwrap();
-        assert_eq!(history, vec![Msg::user("question"), Msg::assistant("new answer")]);
+        assert_eq!(
+            history,
+            vec![Msg::user("question"), Msg::assistant("new answer")]
+        );
         assert_eq!(s.count_memories("card").unwrap(), 1);
         assert_eq!(s.count_unprocessed("card").unwrap(), 2);
         assert!(s.search("card", "summary", 10).unwrap().is_empty());
@@ -1128,8 +1197,12 @@ mod tests {
         let s = MemoryStore::open_in_memory().unwrap();
         s.create_chat("chat", "card", "test").unwrap();
         s.add_chat_message("chat", "card", "user", "keep").unwrap();
-        s.conn.execute_batch("CREATE TRIGGER fail_delete BEFORE DELETE ON chats
-            BEGIN SELECT RAISE(ABORT, 'disk failure'); END;").unwrap();
+        s.conn
+            .execute_batch(
+                "CREATE TRIGGER fail_delete BEFORE DELETE ON chats
+            BEGIN SELECT RAISE(ABORT, 'disk failure'); END;",
+            )
+            .unwrap();
         assert!(s.delete_chat("chat").is_err());
         assert_eq!(s.chat_history("chat", 10).unwrap()[0].content, "keep");
     }
@@ -1137,22 +1210,46 @@ mod tests {
     #[test]
     fn lore_sync_avoids_reindexing_unchanged_text_and_keeps_constants() {
         let s = MemoryStore::open_in_memory().unwrap();
-        let mut entries: Vec<_> = (0..4).map(|i| LoreEntry {
-            source_key: i.to_string(), title: format!("entry{i}"), triggers: "dragon".into(),
+        let mut entries: Vec<_> = (0..4)
+            .map(|i| LoreEntry {
+                source_key: i.to_string(),
+                title: format!("entry{i}"),
+                triggers: "dragon".into(),
+                secondary_triggers: String::new(),
+                content: format!("dragon lore {i}"),
+                constant: false,
+                enabled: true,
+                selective: false,
+                case_sensitive: false,
+                match_whole_words: true,
+                order: 0,
+                scan_depth: None,
+            })
+            .collect();
+        entries.push(LoreEntry {
+            source_key: "constant".into(),
+            title: "always".into(),
+            triggers: String::new(),
             secondary_triggers: String::new(),
-            content: format!("dragon lore {i}"), constant: false,
-            enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-            order: 0, scan_depth: None,
-        }).collect();
-        entries.push(LoreEntry { source_key: "constant".into(), title: "always".into(),
-            triggers: String::new(), secondary_triggers: String::new(),
-            content: "keep this rule".into(), constant: true,
-            enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-            order: 0, scan_depth: None });
+            content: "keep this rule".into(),
+            constant: true,
+            enabled: true,
+            selective: false,
+            case_sensitive: false,
+            match_whole_words: true,
+            order: 0,
+            scan_depth: None,
+        });
         s.replace_lore_entries("card", &entries).unwrap();
-        let before: i64 = s.conn.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+        let before: i64 = s
+            .conn
+            .query_row("SELECT total_changes()", [], |r| r.get(0))
+            .unwrap();
         s.replace_lore_entries("card", &entries).unwrap();
-        let after: i64 = s.conn.query_row("SELECT total_changes()", [], |r| r.get(0)).unwrap();
+        let after: i64 = s
+            .conn
+            .query_row("SELECT total_changes()", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(after, before);
         let hits = s.search_prompt_context("card", "dragon").unwrap();
         assert_eq!(hits.len(), 3);
@@ -1236,8 +1333,8 @@ mod tests {
             .is_none());
     }
 
-#[test]
-fn lore_entries_are_indexed_and_replaced_per_card() {
+    #[test]
+    fn lore_entries_are_indexed_and_replaced_per_card() {
         let store = MemoryStore::open_in_memory().unwrap();
         let lore = vec![
             LoreEntry {
@@ -1247,8 +1344,12 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                 secondary_triggers: String::new(),
                 content: "冬堡城堡位于北方山脉，藏有古老魔法书。".into(),
                 constant: false,
-                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-                order: 0, scan_depth: None,
+                enabled: true,
+                selective: false,
+                case_sensitive: false,
+                match_whole_words: true,
+                order: 0,
+                scan_depth: None,
             },
             LoreEntry {
                 source_key: "card:constant".into(),
@@ -1257,8 +1358,12 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                 secondary_triggers: String::new(),
                 content: "苏菲是一名法师。".into(),
                 constant: true,
-                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-                order: 0, scan_depth: None,
+                enabled: true,
+                selective: false,
+                case_sensitive: false,
+                match_whole_words: true,
+                order: 0,
+                scan_depth: None,
             },
         ];
         store.replace_lore_entries("card-a", &lore).unwrap();
@@ -1296,8 +1401,12 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                 secondary_triggers: String::new(),
                 content: format!("共同关键词世界事实{i}"),
                 constant: false,
-                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-                order: 0, scan_depth: None,
+                enabled: true,
+                selective: false,
+                case_sensitive: false,
+                match_whole_words: true,
+                order: 0,
+                scan_depth: None,
             })
             .collect::<Vec<_>>();
         store.replace_lore_entries("card", &lore).unwrap();
@@ -1370,8 +1479,12 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                 secondary_triggers: String::new(),
                 content: "冬堡学院".into(),
                 constant: false,
-                enabled: true, selective: false, case_sensitive: false, match_whole_words: true,
-                order: 0, scan_depth: None,
+                enabled: true,
+                selective: false,
+                case_sensitive: false,
+                match_whole_words: true,
+                order: 0,
+                scan_depth: None,
             }],
         )
         .unwrap();
@@ -1665,9 +1778,9 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
     fn lore_trigger_matches_sillytavern_standard() {
         use zhuo_card::{activated_entries, WorldBook, WorldEntry};
         use zhuo_llm::Msg;
-        
+
         let store = MemoryStore::open_in_memory().unwrap();
-        
+
         // 1. 构造带世界书的角色卡数据（模拟 SillyTavern 导出）
         let world_book = WorldBook {
             name: "冬堡世界书".into(),
@@ -1678,7 +1791,8 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                     id: "1".into(),
                     keys: vec!["冬堡".into(), "雪祭典".into()],
                     secondary_keys: vec!["集市".into()],
-                    content: "冬堡是北方山城，一年中八个月下雪。每年入冬第一场雪会举办雪祭典。".into(),
+                    content: "冬堡是北方山城，一年中八个月下雪。每年入冬第一场雪会举办雪祭典。"
+                        .into(),
                     constant: false,
                     selective: true,
                     case_sensitive: false,
@@ -1741,24 +1855,28 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
                 },
             ],
         };
-        
+
         // 2. 转换为 zhuo-memory 的 LoreEntry 并存入数据库
-        let lore_entries: Vec<_> = world_book.entries.iter().map(|e| LoreEntry {
-            source_key: e.id.clone(),
-            title: format!("条目{}", e.id),
-            triggers: e.keys.join(","),
-            secondary_triggers: e.secondary_keys.join(","),
-            content: e.content.clone(),
-            constant: e.constant,
-            enabled: e.enabled,
-            selective: e.selective,
-            case_sensitive: e.case_sensitive,
-            match_whole_words: e.match_whole_words,
-            order: e.order,
-            scan_depth: e.scan_depth,
-        }).collect();
+        let lore_entries: Vec<_> = world_book
+            .entries
+            .iter()
+            .map(|e| LoreEntry {
+                source_key: e.id.clone(),
+                title: format!("条目{}", e.id),
+                triggers: e.keys.join(","),
+                secondary_triggers: e.secondary_keys.join(","),
+                content: e.content.clone(),
+                constant: e.constant,
+                enabled: e.enabled,
+                selective: e.selective,
+                case_sensitive: e.case_sensitive,
+                match_whole_words: e.match_whole_words,
+                order: e.order,
+                scan_depth: e.scan_depth,
+            })
+            .collect();
         store.replace_lore_entries("测试卡", &lore_entries).unwrap();
-        
+
         // 3. 模拟聊天历史（最近 5 条）
         let history = vec![
             Msg::user("苏菲，冬堡的雪祭典是什么时候？"),
@@ -1768,35 +1886,53 @@ fn lore_entries_are_indexed_and_replaced_per_card() {
             Msg::user("听说冬堡学院图书馆有禁书区？"),
             Msg::assistant("那是传说，顶层藏着古老魔法书，普通学生进不去。"),
         ];
-        
+
         // 4. 用 zhuo-card 的 activated_entries 作为标准（SillyTavern 兼容实现）
         let history_text: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
         let expected = activated_entries(&world_book, &history_text);
-        
+
         // 5. 用 zhuo-memory 的 trigger_lore_entries 触发
         let actual = store.trigger_lore_entries("测试卡", &history).unwrap();
-        
+
         // 6. 验证触发的条目集合一致（按 order 排序后对比 source_key）
         let expected_keys: Vec<_> = expected.iter().map(|e| e.id.clone()).collect();
         let actual_keys: Vec<_> = actual.iter().map(|e| e.source_key.clone()).collect();
-        
+
         println!("zhuo-card (标准) 触发: {:?}", expected_keys);
         println!("zhuo-memory 触发: {:?}", actual_keys);
-        
-        assert_eq!(actual_keys, expected_keys, "触发条目集合必须与 SillyTavern 标准一致");
-        
+
+        assert_eq!(
+            actual_keys, expected_keys,
+            "触发条目集合必须与 SillyTavern 标准一致"
+        );
+
         // 7. 验证具体内容（基于全词匹配的实际行为）
         // 常量条目 (id=3) 始终触发
-        assert!(actual.iter().any(|e| e.source_key == "3"), "常量条目必须触发");
+        assert!(
+            actual.iter().any(|e| e.source_key == "3"),
+            "常量条目必须触发"
+        );
         // 冬堡/雪祭典 + 集市 (id=1)：历史中有"冬堡学院"但全词匹配下"冬堡"不匹配"冬堡学院"；有"集市"但无主键匹配 → 不触发
-        assert!(!actual.iter().any(|e| e.source_key == "1"), "全词匹配下冬堡条目不应触发");
+        assert!(
+            !actual.iter().any(|e| e.source_key == "1"),
+            "全词匹配下冬堡条目不应触发"
+        );
         // 糖葫芦 (id=2) 在历史中未提及，不应触发
-        assert!(!actual.iter().any(|e| e.source_key == "2"), "未提及关键词的条目不应触发");
+        assert!(
+            !actual.iter().any(|e| e.source_key == "2"),
+            "未提及关键词的条目不应触发"
+        );
         // 禁书/图书馆 (id=4)：历史中有"禁书区"和"图书馆"，但全词匹配下"禁书"不匹配"禁书区" → 不触发
-        assert!(!actual.iter().any(|e| e.source_key == "4"), "全词匹配下禁书条目不应触发");
+        assert!(
+            !actual.iter().any(|e| e.source_key == "4"),
+            "全词匹配下禁书条目不应触发"
+        );
         // 老约翰 (id=5) 已禁用，不应触发
-        assert!(!actual.iter().any(|e| e.source_key == "5"), "禁用条目不应触发");
-        
+        assert!(
+            !actual.iter().any(|e| e.source_key == "5"),
+            "禁用条目不应触发"
+        );
+
         println!("✅ 世界书触发引擎测试通过：zhuo-memory 与 SillyTavern 标准行为一致");
     }
 }

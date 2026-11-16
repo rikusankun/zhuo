@@ -1,59 +1,68 @@
-//! 声明式 Prompt 组装：system = 角色描述 + 示例对话 + 世界设定；
-//! 记忆块作为**独立 system 消息**插在主 system 与历史之间（蓝图 3.1 注入机制）。
+//! 紧凑 Prompt 组装：角色核心信息、检索片段、角色状态和最近历史均有硬长度限制。
 
 use serde_json::Value;
 use zhuo_card::Card;
-use zhuo_llm::Msg;
+use zhuo_llm::{estimate_tokens, Msg};
+use zhuo_memory::PromptHit;
 
-pub fn system_prompt(card: &Card, world: &str) -> String {
-    let mut parts: Vec<String> = Vec::new();
-    if !card.system_prompt.trim().is_empty() {
-        parts.push(card.system_prompt.trim().to_string());
-    }
-    if !card.description.trim().is_empty() {
-        parts.push(card.description.trim().to_string());
-    }
-    if !card.personality.trim().is_empty() {
-        parts.push(format!("[Personality]\n{}", card.personality.trim()));
-    }
-    if !card.scenario.trim().is_empty() {
-        parts.push(format!("[Scenario]\n{}", card.scenario.trim()));
-    }
-    if !card.mes_example.trim().is_empty() {
-        parts.push(card.mes_example.trim().to_string());
-    }
-    if !world.trim().is_empty() {
-        parts.push(format!("[世界设定]\n{}", world.trim()));
-    }
-    parts.join("\n\n")
+pub const MAX_SYSTEM_CHARS: usize = 200;
+pub const MAX_RETRIEVAL_CHARS: usize = 500;
+pub const MAX_PROMPT_CHARS: usize = 1500;
+pub const MAX_HISTORY_MESSAGES: usize = 6;
+
+pub fn system_prompt(card: &Card, _world: &str) -> String {
+    minimal_system_prompt(card, None)
 }
 
-pub fn append_user_context(
-    system: &mut String,
-    persona: Option<(&str, &str)>,
-    world_info: &[String],
-) {
+pub fn minimal_system_prompt(card: &Card, persona: Option<(&str, &str)>) -> String {
+    let mut parts = vec![format!(
+        "扮演「{}」，保持角色一致并自然回应。",
+        card.name.trim()
+    )];
+    let core = [
+        card.system_prompt.trim(),
+        card.post_history_instructions.trim(),
+    ]
+    .into_iter()
+    .filter(|text| !text.is_empty())
+    .collect::<Vec<_>>()
+    .join(" ");
+    if !core.is_empty() {
+        parts.push(core.chars().take(35).collect());
+    }
+    let traits = [card.description.trim(), card.personality.trim()]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("；");
+    if !traits.is_empty() {
+        parts.push(format!(
+            "外貌与性格：{}",
+            traits.chars().take(100).collect::<String>()
+        ));
+    }
     if let Some((name, description)) = persona {
         if !description.trim().is_empty() {
-            system.push_str("\n\n[User Persona");
-            if !name.trim().is_empty() {
-                system.push_str(": ");
-                system.push_str(name.trim());
-            }
-            system.push_str("]\n");
-            system.push_str(description.trim());
+            let persona_text = if name.trim().is_empty() {
+                description.trim().to_string()
+            } else {
+                format!("用户{}：{}", name.trim(), description.trim())
+            };
+            parts.push(persona_text.chars().take(35).collect());
         }
     }
-
-    let entries = world_info
-        .iter()
-        .map(|entry| entry.trim())
-        .filter(|entry| !entry.is_empty())
-        .collect::<Vec<_>>();
-    if !entries.is_empty() {
-        system.push_str("\n\n[World Info]\n");
-        system.push_str(&entries.join("\n\n"));
+    let mut system = String::new();
+    for part in parts {
+        let separator = if system.is_empty() { "" } else { "\n" };
+        let available =
+            MAX_SYSTEM_CHARS.saturating_sub(system.chars().count() + separator.chars().count());
+        if available == 0 {
+            break;
+        }
+        system.push_str(separator);
+        system.extend(part.chars().take(available));
     }
+    system
 }
 
 /// 世界设定 JSON 全量拍平：递归收集所有字符串值。
@@ -90,34 +99,158 @@ fn collect(v: &Value, out: &mut Vec<String>) {
     }
 }
 
-/// [system] + 历史 + [user]；超长时从最早的非 system 消息开始丢，直到放得下。
-pub fn build_messages(system: &str, history: &[Msg], input: &str, max_chars: usize) -> Vec<Msg> {
-    let mut msgs = Vec::with_capacity(history.len() + 2);
-    msgs.push(Msg::system(system));
-    msgs.extend(history.iter().cloned());
-    msgs.push(Msg::user(input));
-
-    while msgs.len() > 2 && total_chars(&msgs) > max_chars {
-        msgs.remove(1);
+pub fn retrieval_block(hits: &[PromptHit]) -> Option<String> {
+    if hits.is_empty() {
+        return None;
     }
-    msgs
+    let mut block = String::from("[检索到的设定与记忆]\n");
+    for hit in hits {
+        let title: String = hit.title.chars().take(40).collect();
+        let prefix = format!("- [{}] {}：", hit.kind, title);
+        let remaining = MAX_RETRIEVAL_CHARS.saturating_sub(block.chars().count());
+        if remaining <= prefix.chars().count() {
+            break;
+        }
+        block.push_str(&prefix);
+        let available = MAX_RETRIEVAL_CHARS.saturating_sub(block.chars().count() + 1);
+        block.extend(hit.content.chars().take(available));
+        block.push('\n');
+    }
+    (block.chars().count() > "[检索到的设定与记忆]\n".chars().count()).then_some(block)
 }
 
-/// 最终组装：主 system → [记忆块（独立 system 消息，本轮生成后即丢弃）] → 历史 → 当前输入。
-pub fn assemble_messages(
+/// Assemble only compact system context, retrieved facts, current state, six messages, and input.
+pub fn assemble_rag_messages(
     system: &str,
-    memory_block: Option<&str>,
+    retrieval: Option<&str>,
+    state: Option<&str>,
     history: &[Msg],
     input: &str,
-    max_chars: usize,
 ) -> Vec<Msg> {
-    let mut msgs = build_messages(system, history, input, max_chars);
-    if let Some(block) = memory_block {
-        if !block.trim().is_empty() {
-            msgs.insert(1, Msg::system(block));
-        }
+    let system = truncate(system, MAX_SYSTEM_CHARS);
+    let mut retrieval = retrieval
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| truncate(text, MAX_RETRIEVAL_CHARS));
+    let mut state = state
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string);
+    let mut history = history
+        .iter()
+        .filter(|message| message.role == "user" || message.role == "assistant")
+        .rev()
+        .take(MAX_HISTORY_MESSAGES)
+        .cloned()
+        .collect::<Vec<_>>();
+    history.reverse();
+    let mut input = input.to_string();
+
+    while prompt_chars_parts(
+        &system,
+        retrieval.as_deref(),
+        state.as_deref(),
+        &history,
+        &input,
+    ) > MAX_PROMPT_CHARS
+        && !history.is_empty()
+    {
+        history.remove(0);
     }
-    msgs
+    trim_optional(&mut state, &system, retrieval.as_deref(), &history, &input);
+    trim_optional(&mut retrieval, &system, state.as_deref(), &history, &input);
+    if prompt_chars_parts(
+        &system,
+        retrieval.as_deref(),
+        state.as_deref(),
+        &history,
+        &input,
+    ) > MAX_PROMPT_CHARS
+    {
+        let excess = prompt_chars_parts(
+            &system,
+            retrieval.as_deref(),
+            state.as_deref(),
+            &history,
+            &input,
+        ) - MAX_PROMPT_CHARS;
+        input = truncate(&input, input.chars().count().saturating_sub(excess));
+    }
+
+    let system = combined_system(&system, retrieval.as_deref(), state.as_deref());
+    let mut messages = vec![Msg::system(system)];
+    messages.extend(history);
+    messages.push(Msg::user(input));
+    messages
+}
+
+pub fn prompt_chars(messages: &[Msg]) -> usize {
+    messages
+        .iter()
+        .map(|message| message.content.chars().count())
+        .sum()
+}
+
+pub fn estimate_prompt_tokens(messages: &[Msg]) -> usize {
+    estimate_tokens(
+        &messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn trim_optional(
+    value: &mut Option<String>,
+    system: &str,
+    other: Option<&str>,
+    history: &[Msg],
+    input: &str,
+) {
+    let Some(current) = value.as_ref() else {
+        return;
+    };
+    let total = prompt_chars_parts(system, other, Some(current), history, input);
+    if total > MAX_PROMPT_CHARS {
+        let excess = total - MAX_PROMPT_CHARS;
+        *value = Some(truncate(
+            current,
+            current.chars().count().saturating_sub(excess),
+        ));
+    }
+}
+
+fn prompt_chars_parts(
+    system: &str,
+    retrieval: Option<&str>,
+    state: Option<&str>,
+    history: &[Msg],
+    input: &str,
+) -> usize {
+    combined_system(system, retrieval, state).chars().count()
+        + history
+            .iter()
+            .map(|message| message.content.chars().count())
+            .sum::<usize>()
+        + input.chars().count()
+}
+
+fn combined_system(system: &str, retrieval: Option<&str>, state: Option<&str>) -> String {
+    let mut combined = system.to_string();
+    for block in [retrieval, state]
+        .into_iter()
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+    {
+        if !combined.is_empty() {
+            combined.push_str("\n\n");
+        }
+        combined.push_str(block);
+    }
+    combined
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 /// 渲染 [当前状态] 块（蓝图 5.2）：顶层键值各占一行，数组用「、」连接；
@@ -152,10 +285,6 @@ pub fn render_state(v: &Value) -> Option<String> {
     Some(format!("[当前状态]\n{}", lines.join("\n")))
 }
 
-fn total_chars(msgs: &[Msg]) -> usize {
-    msgs.iter().map(|m| m.content.chars().count()).sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,12 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_contains_card_and_world() {
+    fn system_prompt_is_compact_and_keeps_identity() {
         let s = system_prompt(&card(), "冰糖葫芦是冬堡特产");
         assert!(s.contains("冬堡学院的学生"));
-        assert!(s.contains("<START>"));
-        assert!(s.contains("[世界设定]"));
-        assert!(s.contains("冰糖葫芦是冬堡特产"));
+        assert!(s.contains("苏菲"));
+        assert!(!s.contains("<START>"));
+        assert!(!s.contains("冰糖葫芦是冬堡特产"));
+        assert!(s.chars().count() <= MAX_SYSTEM_CHARS);
     }
 
     #[test]
@@ -194,49 +324,111 @@ mod tests {
     }
 
     #[test]
-    fn truncation_drops_oldest_non_system() {
-        let history = vec![
-            Msg::user("旧问题"),
-            Msg::assistant("旧回答"),
-            Msg::user("较新的问题"),
-            Msg::assistant("较新的回答"),
-        ];
-        let msgs = build_messages("SYS", &history, "新问题", 14);
-        assert_eq!(msgs.first().unwrap().role, "system");
-        assert_eq!(msgs.last().unwrap().content, "新问题");
-        assert!(!msgs.iter().any(|m| m.content == "旧问题"));
+    fn retrieval_block_is_capped_at_five_hundred_characters() {
+        let hits = (0..6)
+            .map(|i| PromptHit {
+                kind: "设定",
+                title: format!("条目{i}"),
+                content: "长设定".repeat(300),
+                score: i as f64,
+            })
+            .collect::<Vec<_>>();
+        let block = retrieval_block(&hits).unwrap();
+        assert!(block.chars().count() <= MAX_RETRIEVAL_CHARS);
     }
 
     #[test]
-    fn newest_user_message_is_never_dropped() {
-        let history: Vec<Msg> = (0..50)
-            .map(|i| Msg::user(format!("历史消息{i:020}")))
-            .collect();
-        let msgs = build_messages("SYS", &history, "当前输入", 10);
-        assert_eq!(msgs.len(), 2);
-        assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[1].content, "当前输入");
-    }
-
-    #[test]
-    fn memory_block_sits_between_system_and_history() {
-        let history = vec![Msg::user("上一问"), Msg::assistant("上一答")];
-        let msgs = assemble_messages(
-            "SYS",
-            Some("[相关记忆]\n- 苏菲爱吃糖葫芦"),
+    fn final_prompt_keeps_only_recent_six_and_never_exceeds_limit() {
+        let history = (0..20)
+            .map(|i| Msg::user(format!("历史{i} {}", "旧".repeat(130))))
+            .collect::<Vec<_>>();
+        let messages = assemble_rag_messages(
+            &"系统".repeat(150),
+            Some(&"检索".repeat(300)),
+            Some(&"状态".repeat(300)),
             &history,
-            "新问题",
-            12000,
+            &"当前".repeat(900),
         );
-        assert_eq!(msgs[0].role, "system");
-        assert!(msgs[0].content.starts_with("SYS"));
-        assert_eq!(msgs[1].role, "system");
-        assert!(msgs[1].content.contains("相关记忆"));
-        assert_eq!(msgs[2].content, "上一问");
-        assert_eq!(msgs.last().unwrap().content, "新问题");
-        // 无记忆时不插空 system
-        let msgs = assemble_messages("SYS", None, &history, "新问题", 12000);
-        assert_eq!(msgs[1].content, "上一问");
+        assert!(prompt_chars(&messages) <= MAX_PROMPT_CHARS);
+        assert!(messages[0]
+            .content
+            .starts_with(&"系统".repeat(MAX_SYSTEM_CHARS / 2)));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "system")
+                .count(),
+            1
+        );
+        assert!(messages.len() <= MAX_HISTORY_MESSAGES + 2);
+        assert!(messages
+            .iter()
+            .any(|message| message.content.starts_with("当前")));
+        assert_eq!(messages.last().unwrap().role, "user");
+    }
+
+    #[test]
+    fn retrieved_context_and_state_share_the_first_system_message() {
+        let messages = assemble_rag_messages(
+            "base",
+            Some("[检索]\n设定"),
+            Some("[当前状态]\n位置：冬堡"),
+            &[],
+            "hi",
+        );
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0].content.starts_with("base\n\n[检索]"));
+        assert!(messages[0].content.contains("[当前状态]\n位置：冬堡"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "system")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prompt_uses_only_the_six_most_recent_history_messages() {
+        let history = (0..10)
+            .map(|index| Msg::user(format!("history-{index}")))
+            .collect::<Vec<_>>();
+        let messages = assemble_rag_messages("system", None, None, &history, "latest");
+        let retained = messages[1..messages.len() - 1]
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            retained,
+            [
+                "history-4",
+                "history-5",
+                "history-6",
+                "history-7",
+                "history-8",
+                "history-9"
+            ]
+        );
+    }
+
+    #[test]
+    fn stored_system_messages_are_not_replayed_as_chat_history() {
+        let history = vec![
+            Msg::system("old full system prompt"),
+            Msg::user("previous question"),
+            Msg::assistant("previous answer"),
+        ];
+        let messages = assemble_rag_messages("compact system", None, None, &history, "latest");
+        assert!(messages
+            .iter()
+            .all(|message| message.content != "old full system prompt"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message.role == "system")
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -254,29 +446,12 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_appends_state_block() {
-        let mut sys = system_prompt(&card(), "冬堡特产糖葫芦");
-        if let Some(sb) = render_state(&serde_json::json!({"位置": "冬堡学院"})) {
-            sys.push_str("\n\n");
-            sys.push_str(&sb);
-        }
-        assert!(sys.contains("[世界设定]"));
-        assert!(sys.contains("[当前状态]"));
-        assert!(sys.contains("位置：冬堡学院"));
-    }
-
-    #[test]
-    fn user_persona_and_local_world_info_are_system_context() {
-        let mut system = "Character".to_string();
-        append_user_context(
-            &mut system,
-            Some(("Traveler", "A curious traveler.")),
-            &["  The old bridge is guarded.  ".into(), " ".into()],
+    fn persona_fits_inside_the_basic_system_budget() {
+        let system = minimal_system_prompt(
+            &card(),
+            Some(("Traveler", &"A curious traveler. ".repeat(20))),
         );
-
-        assert_eq!(
-            system,
-            "Character\n\n[User Persona: Traveler]\nA curious traveler.\n\n[World Info]\nThe old bridge is guarded."
-        );
+        assert!(system.contains("Traveler"));
+        assert!(system.chars().count() <= MAX_SYSTEM_CHARS);
     }
 }
