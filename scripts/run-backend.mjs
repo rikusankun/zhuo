@@ -8,6 +8,8 @@ dotenv.config({ path: join(projectRoot, '.env') });
 
 const command = process.platform === 'win32' ? 'cargo.exe' : 'cargo';
 const child = spawn(command, ['run', '-p', 'zhuo-server'], {
+  cwd: projectRoot,
+  windowsHide: true,
   stdio: 'inherit',
   env: { ...process.env },
 });

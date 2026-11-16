@@ -14,7 +14,6 @@ pub struct ServerState {
     pub model: Arc<String>,
     pub cards_dir: Arc<PathBuf>,
     pub world: Arc<String>,
-    pub max_chars: usize,
     pub include_usage: bool,
     /// SQLite 记忆库（Connection 非 Sync，用 Mutex 短临界区保护）
     pub memory: Arc<Mutex<MemoryStore>>,
@@ -30,6 +29,17 @@ pub struct ServerState {
     pub ollama_native: bool,
     /// .env 是否显式配置了 ZHUO_API_KEY（决定连接设置的优先级与来源标注）
     pub env_api_key: bool,
+}
+
+pub struct ExtractionGuard {
+    state: ServerState,
+    card: String,
+}
+
+impl Drop for ExtractionGuard {
+    fn drop(&mut self) {
+        self.state.end_extract(&self.card);
+    }
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -74,7 +84,6 @@ impl ServerState {
             model: Arc::new(env_or("ZHUO_MODEL", "qwen2.5-coder:3b")),
             cards_dir: Arc::new(cards_dir),
             world: Arc::new(world),
-            max_chars: env_or("ZHUO_MAX_CHARS", "12000").parse().unwrap_or(12_000),
             include_usage: std::env::var("ZHUO_NO_USAGE").is_err(),
             memory: Arc::new(Mutex::new(memory)),
             summary_model: Arc::new(std::env::var("ZHUO_SUMMARY_MODEL").unwrap_or_default()),
@@ -110,6 +119,13 @@ impl ServerState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(card.to_string())
+    }
+
+    pub fn extraction_guard(&self, card: &str) -> Option<ExtractionGuard> {
+        self.try_begin_extract(card).then(|| ExtractionGuard {
+            state: self.clone(),
+            card: card.to_string(),
+        })
     }
 
     pub fn end_extract(&self, card: &str) {
@@ -181,16 +197,19 @@ impl ServerState {
                 }
             }
         }
-        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out.sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+        out.dedup_by(|a, b| a.id == b.id);
         out
     }
 
-    pub fn card_source_path(&self, id: &str) -> Option<PathBuf> {
-        std::fs::read_dir(&*self.cards_dir)
-            .ok()?
+    pub fn card_source_paths(&self, id: &str) -> Vec<PathBuf> {
+        let Ok(entries) = std::fs::read_dir(&*self.cards_dir) else {
+            return Vec::new();
+        };
+        let mut paths: Vec<_> = entries
             .flatten()
             .map(|e| e.path())
-            .find(|p| {
+            .filter(|p| {
                 matches!(
                     p.extension()
                         .and_then(|s| s.to_str())
@@ -199,6 +218,19 @@ impl ServerState {
                     Some("json" | "png")
                 ) && zhuo_card::load_card(p).map(|c| c.id == id).unwrap_or(false)
             })
+            .collect();
+        paths.sort_by_key(|p| {
+            (
+                p.extension()
+                    .is_none_or(|ext| !ext.eq_ignore_ascii_case("png")),
+                p.clone(),
+            )
+        });
+        paths
+    }
+
+    pub fn card_source_path(&self, id: &str) -> Option<PathBuf> {
+        self.card_source_paths(id).into_iter().next()
     }
 }
 
@@ -221,7 +253,6 @@ mod tests {
             model: Arc::new("environment-main".into()),
             cards_dir: Arc::new(PathBuf::from("examples")),
             world: Arc::new(String::new()),
-            max_chars: 12000,
             include_usage: true,
             memory: Arc::new(Mutex::new(memory)),
             summary_model: Arc::new("environment-summary".into()),

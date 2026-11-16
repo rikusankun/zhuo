@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
+
+pub const FIRST_TOKEN_TIMEOUT_ERROR: &str = "first token timeout";
 
 /// 默认推理端点：本地 Ollama 的 OpenAI 兼容层。
 /// 与 Ollama 的已知差异均已兼容：首帧 delta 带 role、独立 finish_reason 帧、
@@ -396,8 +399,19 @@ impl NdjsonBridge {
 pub async fn stream_chat_ex(
     cfg: &StreamConfig<'_>,
     messages: &[Msg],
+    on_token: impl FnMut(&str) -> bool,
+) -> Result<StreamOutcome> {
+    stream_chat_ex_with_first_token_timeout(cfg, messages, None, on_token).await
+}
+
+pub async fn stream_chat_ex_with_first_token_timeout(
+    cfg: &StreamConfig<'_>,
+    messages: &[Msg],
+    first_token_timeout: Option<Duration>,
     mut on_token: impl FnMut(&str) -> bool,
 ) -> Result<StreamOutcome> {
+    let first_token_deadline =
+        first_token_timeout.map(|duration| tokio::time::Instant::now() + duration);
     // 带 num_gpu 且开启原生通道 → Ollama 原生端点，options 才会真正生效；
     // 否则退化为标准 OpenAI-compatible 请求（options 仍会带上，供兼容端点读取）。
     let native = cfg.ollama_native && cfg.num_gpu.is_some();
@@ -426,16 +440,39 @@ pub async fn stream_chat_ex(
             options: cfg.num_gpu.map(|n| ChatOptions { num_gpu: n }),
         })?
     };
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(url)
-        .bearer_auth(cfg.api_key)
-        .json(&body)
-        .send()
-        .await?;
+    let mut client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
+    if reqwest::Url::parse(cfg.base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .is_some_and(|host| {
+            host == "localhost"
+                || host == "[::1]"
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        })
+    {
+        client = client.no_proxy();
+    }
+    let client = client.build()?;
+    let request = client.post(url).bearer_auth(cfg.api_key).json(&body);
+    let resp = if let Some(deadline) = first_token_deadline {
+        tokio::time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| anyhow!(FIRST_TOKEN_TIMEOUT_ERROR))??
+    } else {
+        request.send().await?
+    };
     if !resp.status().is_success() {
         let status = resp.status();
-        let body = resp.text().await.context("read upstream error response")?;
+        let body = if let Some(deadline) = first_token_deadline {
+            tokio::time::timeout_at(deadline, resp.text())
+                .await
+                .map_err(|_| anyhow!(FIRST_TOKEN_TIMEOUT_ERROR))?
+                .context("read upstream error response")?
+        } else {
+            resp.text().await.context("read upstream error response")?
+        };
         let detail: String = body.trim().chars().take(2048).collect();
         let truncated = body.trim().chars().count() > 2048;
         let detail = if truncated {
@@ -466,8 +503,23 @@ pub async fn stream_chat_ex(
     let mut bridge = NdjsonBridge::default();
     let mut outcome = StreamOutcome::default();
     let mut aborted = false;
+    let mut first_token_received = false;
     let mut stream = resp.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let next = if !first_token_received {
+            if let Some(deadline) = first_token_deadline {
+                tokio::time::timeout_at(deadline, stream.next())
+                    .await
+                    .map_err(|_| anyhow!(FIRST_TOKEN_TIMEOUT_ERROR))?
+            } else {
+                stream.next().await
+            }
+        } else {
+            stream.next().await
+        };
+        let Some(chunk) = next else {
+            break;
+        };
         let chunk = chunk?;
         if let Some(f) = dump.as_mut() {
             f.write_all(&chunk)?;
@@ -478,6 +530,9 @@ pub async fn stream_chat_ex(
             chunk.to_vec()
         };
         for ev in parser.push(&framed)? {
+            if matches!(&ev, SseEvent::Token(token) if !token.is_empty()) {
+                first_token_received = true;
+            }
             if !apply(ev, &mut outcome, &mut on_token) {
                 aborted = true;
                 break;
@@ -498,7 +553,10 @@ pub async fn stream_chat_ex(
         }
         if !aborted {
             for ev in parser.finish()? {
-                apply(ev, &mut outcome, &mut on_token);
+                if !apply(ev, &mut outcome, &mut on_token) {
+                    aborted = true;
+                    break;
+                }
             }
         }
     }
@@ -1054,5 +1112,109 @@ mod tests {
         assert_eq!(out.content, "好");
         let req = request_json(&captured);
         assert_eq!(req["options"]["num_gpu"], 99, "主模型全量上 GPU");
+    }
+
+    #[tokio::test]
+    async fn first_token_deadline_returns_a_distinct_timeout_error() {
+        let body = sse(&[&delta("迟")]);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut socket).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(header.as_bytes()).await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let _ = socket.write_all(&body).await;
+        });
+        let base = format!("http://{addr}");
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+        };
+        let error = stream_chat_ex_with_first_token_timeout(
+            &cfg,
+            &[Msg::user("hi")],
+            Some(Duration::from_millis(20)),
+            |_| true,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), FIRST_TOKEN_TIMEOUT_ERROR);
+    }
+
+    #[tokio::test]
+    async fn first_token_deadline_does_not_limit_later_generation() {
+        let body = sse(&[&delta("首"), &delta("尾")]);
+        let split = body
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _ = read_request(&mut socket).await;
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(header.as_bytes()).await;
+            let _ = socket.write_all(&body[..split]).await;
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = socket.write_all(&body[split..]).await;
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut sink = [0u8; 1024];
+                loop {
+                    match socket.read(&mut sink).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            })
+            .await;
+        });
+        let base = format!("http://{addr}");
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+        };
+        let result = stream_chat_ex_with_first_token_timeout(
+            &cfg,
+            &[Msg::user("hi")],
+            Some(Duration::from_millis(40)),
+            |_| true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "首尾");
     }
 }

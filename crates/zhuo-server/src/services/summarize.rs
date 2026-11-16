@@ -198,9 +198,12 @@ pub async fn run_extraction(st: &ServerState, card: &str) -> Result<Option<Strin
         num_gpu: (connection.provider == "ollama").then_some(0),
         ollama_native: native,
     };
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(180),
-        zhuo_llm::stream_chat_ex(&cfg, &msgs, |_| true)).await
-        .map_err(|_| anyhow::anyhow!("memory extraction timed out"))??;
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        zhuo_llm::stream_chat_ex(&cfg, &msgs, |_| true),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("memory extraction timed out"))??;
 
     // 3) 容错解析；失败直接跳过（不写记忆、不标记——下轮对话会再次触发）
     let Some(summary) = extract_summary(&outcome.content) else {

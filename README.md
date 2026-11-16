@@ -17,6 +17,8 @@
 
 - **对话记忆**：保存每个角色的会话和消息，切换会话后仍可继续。
 - **长期记忆**：可选后台提取模型把较早的对话整理成可检索的记忆，为后续聊天补充重要信息。
+- 后台提取以单个 SQLite 事务写入记忆、FTS 索引并推进消息游标；同一批消息重试不会重复创建记忆。
+- **设定检索**：角色卡长背景、角色世界书、导入世界书和自定义 World Info 会按条目写入 SQLite `lore_entries`，并使用 jieba 分词建立 FTS5 索引；聊天历史和长期记忆也保存在 SQLite。
 - 长期记忆提取模型可在设置面板单独选择，也可以关闭。提取任务固定使用 CPU（`num_gpu: 0`），避免与主聊天模型争抢显存。
 - SQLite 使用 WAL 日志模式和 5 秒 busy timeout，减少读取历史与写入记忆同时发生时的数据库锁冲突。
 
@@ -25,10 +27,14 @@
 - 浏览器 + Rust/Axum + SQLite；不需要桌面壳、容器或独立数据库服务。
 - Ollama 与 Web、后端可通过一个命令启动。
 - 不安装或启用额外模块也能完成基本角色聊天；更复杂的上下文和记忆功能按需使用。
+- 每次请求最多检索 3 条设定和 3 条长期记忆，检索上下文总长不超过 500 字。
+- 基础 System Prompt 不超过 200 字；只保留最近 6 条原始对话；最终 Prompt 总长硬限制为 1500 字。
+- 等待首个模型 token 最多 30 秒；超时会通过 SSE 显示明确错误，不会把首 token 限制误用成整段生成时限。
 
 ## 功能一览
 
 - 导入 PNG 或 JSON 角色卡，支持 Character Card V2 的常见字段、首条消息和内嵌角色世界书。
+- 可从侧栏添加角色卡，或删除角色及其关联的对话、消息、长期记忆和角色状态。
 - 同一角色建立多个会话，流式接收回复、查看历史、重新生成最后一条回复。
 - 管理 Persona，并把 Persona 与本地 World Info 作为独立 System Prompt 上下文注入，不混入用户消息。
 - 关键词触发 World Info；支持常驻条目、主/次关键词、大小写、全词匹配和扫描深度等字段。
@@ -95,8 +101,8 @@ npm run start
 
 ### 5. 选择模型并开始聊天
 
-1. 在页面中选择一个角色；没有角色时，使用左侧角色栏的导入按钮导入 PNG 或 JSON 角色卡。
-2. 打开页面右上角的齿轮“设置”。
+1. 在页面中选择一个角色；没有角色时，使用左侧角色栏的“+”导入 PNG 或 JSON 角色卡。
+2. 点击左下角 Persona 菜单中的省略号，再选择“设置”。
 3. 确认 Ollama Base URL 为 `http://127.0.0.1:11434`，点击“刷新本地模型列表”。
 4. 在“主聊天模型”中选择刚刚下载的模型。若要启用长期记忆提取，再选择“后台记忆提取模型”；留空即关闭自动提取。
 5. 调整显存分配层数并开始聊天。模型、连接设置和显存层数会保存到本地 SQLite，后续请求立即使用，不需要重启应用。
@@ -109,6 +115,21 @@ npm run start
 - 后台记忆提取模型强制使用 `num_gpu: 0`，在 CPU 上运行。选择较小的模型可减少提取延迟。
 - 设置面板的选择保存在 `app_settings` 数据表中，并优先于环境变量里的模型默认值。
 - 也可在设置面板连接其他 OpenAI 兼容服务。远程服务的 Base URL、密钥和模型要求以服务商文档为准。
+
+## 提示词检索与长度验证
+
+每次发消息时，后端会先把当前角色卡字段、角色卡内嵌世界书、已导入世界书和前端自定义 World Info 同步到 SQLite 的 `lore_entries` / `lore_entries_fts`。jieba 对用户最新输入分词后，与长期记忆的 FTS5 索引分别进行 BM25 检索，各取最多 3 条。两类命中内容合计最多 500 字。
+
+发送给模型的消息只包括最多 200 字的基础 System Prompt、最多 500 字的检索内容、当前角色状态、最近 6 条历史消息和最新输入。组装器先删除最旧历史，再压缩状态、检索片段，最后必要时裁剪输入，保证最终正文总字符数不超过 1500。长度限制仅针对本次模型请求，不会裁剪已保存的历史记录。
+
+验证长度上限：
+
+1. 启动 `npm run start`，打开浏览器开发者工具的 Network 面板。
+2. 在页面中发送一条消息，选中 `/api/chat` 的 EventStream 响应。
+3. 首个 SSE 数据事件包含 `prompt_chars` 和 `estimated_tokens`，页面输入框上方也会显示 `提示词 N/1500 字`。
+4. 后端终端同时打印 `[prompt] ... chars=N ...`。即使输入或设定很长，`N` 也应始终不超过 `1500`；超过限制时后端会在请求 Ollama 前返回错误。
+
+首 token 30 秒超时也可在同一 EventStream 响应中验证：超时时会收到 `生成超时，请检查上下文或降低显存层数` 错误事件。该计时只覆盖首 token，收到第一个 token 后不限制后续生成时长。
 
 ## 环境变量
 
@@ -134,7 +155,6 @@ Copy-Item .env.example .env
 | `ZHUO_DB` | SQLite 数据库文件路径，默认项目根目录的 `zhuo.db` |
 | `ZHUO_CARDS_DIR` | 角色卡目录，默认 `examples` |
 | `ZHUO_WORLD` | 初始世界设定 JSON 路径，默认 `examples/world.json` |
-| `ZHUO_MAX_CHARS` | 提示词上下文字符上限，默认 `12000` |
 | `ZHUO_PORT` | Rust 后端监听端口，默认 `1127` |
 | `ZHUO_NO_USAGE` | 任意非空值会关闭流式响应中的 usage 统计请求 |
 | `OLLAMA_CONTEXT_LENGTH` | Ollama 服务启动时使用的上下文长度；示例默认 `4096` |
@@ -162,12 +182,17 @@ cargo test --workspace
 
 本地只运行前端时可使用 `npm run dev`；单独运行后端可使用 `npm run backend`。开发服务器默认在 `3000` 端口，后端默认在 `1127` 端口，前端会把 `/api` 请求代理给后端。Vite 会忽略 SQLite 数据库及 WAL/SHM 文件，避免数据库写入触发页面热更新。
 
+前端 HTTP 请求集中在 `src/api/client.ts`，React 组件只消费 API 方法和结果。后端 HTTP handler 留在 `routes` 模块；领域工作流逐步抽入 `services`，service 不依赖 Axum 的请求/响应类型，并返回可独立测试的结果。只在实际抽取领域逻辑时新增 service，避免纯转发包装层。
+
 ## 项目结构
 
 ```text
 src/                         React 前端
+src/api/                     前端 HTTP API 客户端
 scripts/                     本地开发启动脚本
 crates/zhuo-server/          Axum HTTP 服务和 API 路由
+crates/zhuo-server/src/routes/ 按领域组织的 HTTP handlers
+crates/zhuo-server/src/services/ 领域 service（含记忆提取）
 crates/zhuo-llm/              模型服务请求与流式响应
 crates/zhuo-memory/           SQLite 会话、记忆与设置存储
 crates/zhuo-card/             角色卡解析与导入导出

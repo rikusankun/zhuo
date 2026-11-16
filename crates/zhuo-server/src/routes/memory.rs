@@ -53,7 +53,11 @@ pub async fn search_memories(
 ) -> Json<Value> {
     let key = st.card_key(&q.get("card").cloned().unwrap_or_default());
     let query = q.get("q").cloned().unwrap_or_default();
-    let limit = q.get("limit").and_then(|s| s.parse::<usize>().ok()).unwrap_or(20).clamp(1, 100);
+    let limit = q
+        .get("limit")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(20)
+        .clamp(1, 100);
     let store = st.memory.lock().unwrap_or_else(|e| e.into_inner());
     match memory_service::query_memories(&store, &key, &query, limit) {
         Ok(MemoryQuery::Recent {
