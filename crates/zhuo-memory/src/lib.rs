@@ -271,10 +271,9 @@ impl MemoryStore {
     }
 
     pub fn clear_messages(&self, card_name: &str) -> Result<usize> {
-        Ok(self
-            .conn
+        self.conn
             .execute("DELETE FROM messages WHERE card_name = ?1", [card_name])
-            .context("clear messages")?)
+            .context("clear messages")
     }
 
     // ---------- Chat sessions ----------
@@ -442,14 +441,13 @@ impl MemoryStore {
 
     /// 把 `upto_id`（含）之前的未处理消息标记为已总结
     pub fn mark_processed(&self, card_name: &str, upto_id: i64) -> Result<usize> {
-        Ok(self
-            .conn
+        self.conn
             .execute(
                 "UPDATE messages SET processed = 1
                  WHERE card_name = ?1 AND processed = 0 AND id <= ?2",
                 rusqlite::params![card_name, upto_id],
             )
-            .context("mark processed")?)
+            .context("mark processed")
     }
 
     /// 最近写入的记忆列表（调试面板用，id 倒序）

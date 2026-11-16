@@ -122,7 +122,7 @@ impl SseParser {
         while let Some(pos) = self.buf.iter().position(|&b| b == b'\n') {
             let raw: Vec<u8> = self.buf.drain(..=pos).collect();
             let line = String::from_utf8_lossy(&raw);
-            let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+            let line = line.trim_end_matches(['\r', '\n']);
             self.handle_line(line, &mut events)?;
             if self.done {
                 break;
@@ -140,9 +140,7 @@ impl SseParser {
         if !self.buf.is_empty() {
             let raw = std::mem::take(&mut self.buf);
             let line = String::from_utf8_lossy(&raw).to_string();
-            let line = line
-                .trim_end_matches(|c| c == '\r' || c == '\n')
-                .to_string();
+            let line = line.trim_end_matches(['\r', '\n']).to_string();
             self.handle_line(&line, &mut events)?;
         }
         self.dispatch(&mut events)?;
@@ -160,11 +158,10 @@ impl SseParser {
             Some((f, v)) => (f, v.strip_prefix(' ').unwrap_or(v)),
             None => (line, ""),
         };
-        match field {
-            "data" => self.data_lines.push(value.to_string()),
-            // event / id / retry 及未知字段按 SSE 规范忽略
-            _ => {}
+        if field == "data" {
+            self.data_lines.push(value.to_string());
         }
+        // event / id / retry 及未知字段按 SSE 规范忽略
         Ok(())
     }
 
@@ -543,7 +540,9 @@ pub async fn stream_chat(
 /// 轻量 token 估算（**启发式，非真实分词器**）：
 /// - CJK / 全角字符按 1 token/字（cl100k 对常见汉字多为单 token）
 /// - 其余非空白字符按 ~4 字符/token 折算
+///
 /// 用途：DRY_RUN 自检 prompt 体积、远端 key 到位前先估基线。
+///
 /// 真值仍以 StreamOutcome.usage 为准（远端支持 include_usage 时）。
 pub fn estimate_tokens(text: &str) -> usize {
     let mut cjk = 0usize;
@@ -555,7 +554,7 @@ pub fn estimate_tokens(text: &str) -> usize {
             other += 1;
         }
     }
-    cjk + (other + 3) / 4
+    cjk + other.div_ceil(4)
 }
 
 fn is_cjk(c: char) -> bool {

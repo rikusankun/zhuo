@@ -63,7 +63,7 @@ fn harvest_quoted(raw: &str, keys: &[&str]) -> Option<String> {
 /// 2. 碎 JSON 的引号收割；
 /// 3. 剥离 markdown 围栏与 `总结：` 类标签前缀后的正文；
 /// 4. 纯文本兜底（截断 200 字）。
-/// 返回 None = 解析失败（太短或纯 JSON 垃圾），调用方应跳过本轮。
+///    返回 None = 解析失败（太短或纯 JSON 垃圾），调用方应跳过本轮。
 pub fn extract_summary(raw: &str) -> Option<String> {
     let t = raw.trim();
     if t.is_empty() {
