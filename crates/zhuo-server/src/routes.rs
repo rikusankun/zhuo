@@ -418,8 +418,14 @@ fn card_lore_entries(
         }
         if let Some(history) = history {
             let latest = history.last().map(|s| s.to_lowercase()).unwrap_or_default();
-            if !entry.keys.split([',', '，']).map(str::trim)
-                .any(|key| !key.is_empty() && latest.contains(&key.to_lowercase())) { continue; }
+            if !entry
+                .keys
+                .split([',', '，'])
+                .map(str::trim)
+                .any(|key| !key.is_empty() && latest.contains(&key.to_lowercase()))
+            {
+                continue;
+            }
         }
         push_lore_entry(
             &mut entries,
@@ -482,7 +488,12 @@ fn append_worldbook(
         .enumerate()
         .filter(|(_, entry)| entry.enabled)
     {
-        if active.as_ref().is_some_and(|entries| !entries.contains(entry)) { continue; }
+        if active
+            .as_ref()
+            .is_some_and(|entries| !entries.contains(entry))
+        {
+            continue;
+        }
         out.push(zhuo_memory::LoreEntry {
             source_key: format!("{source}:{index}:{}", entry.id),
             title: if entry.id.is_empty() {
@@ -629,11 +640,15 @@ pub async fn delete_card(
         .then_some(card.name.as_str());
 
     let result = (|| -> anyhow::Result<()> {
-        let sources = paths.iter().map(|path| std::fs::read(path).map(|bytes| (path, bytes)))
+        let sources = paths
+            .iter()
+            .map(|path| std::fs::read(path).map(|bytes| (path, bytes)))
             .collect::<std::io::Result<Vec<_>>>()?;
         for (index, (path, _)) in sources.iter().enumerate() {
             if let Err(error) = std::fs::remove_file(path) {
-                for (removed, bytes) in &sources[..index] { std::fs::write(removed, bytes)?; }
+                for (removed, bytes) in &sources[..index] {
+                    std::fs::write(removed, bytes)?;
+                }
                 anyhow::bail!("删除角色卡失败，已恢复文件：{error}");
             }
         }
@@ -646,7 +661,9 @@ pub async fn delete_card(
         if let Err(error) = delete_result {
             for (path, source) in &sources {
                 if let Err(restore_error) = std::fs::write(path, source) {
-                    anyhow::bail!("删除角色数据失败：{error:#}；恢复角色卡文件也失败：{restore_error}");
+                    anyhow::bail!(
+                        "删除角色数据失败：{error:#}；恢复角色卡文件也失败：{restore_error}"
+                    );
                 }
             }
             return Err(anyhow::anyhow!(
@@ -688,36 +705,49 @@ pub async fn import_card(
     let path = st.cards_dir.join(format!("{}.{}", card.id, ext));
     let write_result = (|| -> std::io::Result<bool> {
         std::fs::create_dir_all(&*st.cards_dir)?;
-        let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
             Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                if zhuo_card::load_card(&path).is_ok_and(|existing| existing.raw == card.raw) { return Ok(false); }
+                if zhuo_card::load_card(&path).is_ok_and(|existing| existing.raw == card.raw) {
+                    return Ok(false);
+                }
                 return Err(e);
             }
             Err(e) => return Err(e),
         };
         let result = std::io::Write::write_all(&mut file, &bytes);
         drop(file);
-        if let Err(e) = result { std::fs::remove_file(&path)?; return Err(e); }
+        if let Err(e) = result {
+            std::fs::remove_file(&path)?;
+            return Err(e);
+        }
         Ok(true)
     })();
     let created = match write_result {
         Ok(created) => created,
         Err(e) => {
-        return Json(json!({"error": format!("保存角色卡失败：{e}")}));
+            return Json(json!({"error": format!("保存角色卡失败：{e}")}));
         }
     };
     let index_result = (|| -> anyhow::Result<()> {
         let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
-        let worldbook = mem.get_setting("worldbook")?.map(|raw|
-            serde_json::from_str::<zhuo_card::WorldBook>(&raw)).transpose()?;
+        let worldbook = mem
+            .get_setting("worldbook")?
+            .map(|raw| serde_json::from_str::<zhuo_card::WorldBook>(&raw))
+            .transpose()?;
         let entries = card_lore_entries(&card, &st.world, worldbook.as_ref(), &[], &[], None);
         mem.replace_lore_entries(&card.id, &entries)
     })();
     if let Err(e) = index_result {
         if created {
             if let Err(cleanup) = std::fs::remove_file(&path) {
-                return Json(json!({"error": format!("索引角色设定失败：{e:#}；清理文件失败：{cleanup}")}));
+                return Json(
+                    json!({"error": format!("索引角色设定失败：{e:#}；清理文件失败：{cleanup}")}),
+                );
             }
         }
         return Json(json!({"error": format!("索引角色设定失败：{e:#}")}));
@@ -900,7 +930,16 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
     }
     // 1. 卡 + 状态 + 历史 + 记忆检索（短临界区，不跨 await 持锁）
     //    存储键一律用卡 id（内容短 hash）——同名卡彻底隔离
-    let (card_key, active_chat, expected_last_id, msgs, prompt_hits, history_count) = {
+    let (
+        card_key,
+        active_chat,
+        expected_last_id,
+        msgs,
+        prompt_hits,
+        history_count,
+        char_name,
+        user_name,
+    ) = {
         let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
         let card = match st.find_card(&req.card) {
             Ok(c) => c,
@@ -914,10 +953,12 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         let active_chat = match mem.get_chat(&chat_id) {
             Ok(Some(c)) if c.card == card.id => c,
             Ok(Some(_)) => return sse_error("会话不属于当前角色".into()),
-            Ok(None) if req.chat_id.is_empty() => match mem.create_chat(&chat_id, &card.id, "默认对话") {
-                Ok(c) => c,
-                Err(e) => return sse_error(format!("create chat: {e:#}")),
-            },
+            Ok(None) if req.chat_id.is_empty() => {
+                match mem.create_chat(&chat_id, &card.id, "默认对话") {
+                    Ok(c) => c,
+                    Err(e) => return sse_error(format!("create chat: {e:#}")),
+                }
+            }
             Ok(None) => return sse_error("会话不存在，请刷新后重试".into()),
             Err(e) => return sse_error(format!("read chat: {e:#}")),
         };
@@ -931,8 +972,11 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         };
         if req.regenerate {
             let len = history.len();
-            if len < 2 || history[len - 1].role != "assistant"
-                || history[len - 2].role != "user" || history[len - 2].content != req.message {
+            if len < 2
+                || history[len - 1].role != "assistant"
+                || history[len - 2].role != "user"
+                || history[len - 2].content != req.message
+            {
                 return sse_error("只能重新生成最后一轮已保存的回复".into());
             }
             history.truncate(len - 2);
@@ -1005,6 +1049,10 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             messages,
             hits,
             history_count,
+            card.name.clone(),
+            persona
+                .map(|(n, _)| n.to_string())
+                .unwrap_or_else(|| "用户".to_string()),
         )
     };
 
@@ -1061,30 +1109,54 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         let mut partial = String::new();
         let result = {
             let generation = zhuo_llm::stream_chat_ex_with_first_token_timeout(
-                &cfg, &msgs, Some(std::time::Duration::from_secs(30)), |tok| {
+                &cfg,
+                &msgs,
+                Some(std::time::Duration::from_secs(30)),
+                |tok| {
                     partial.push_str(tok);
                     tx.send(json!({ "token": tok }).to_string()).is_ok()
-                });
+                },
+            );
             tokio::select! {
                 result = generation => Some(result),
                 _ = tx.closed() => None,
             }
         };
         let result = match result {
-            None => Ok(StreamOutcome { content: partial, aborted: true, ..Default::default() }),
+            None => Ok(StreamOutcome {
+                content: partial,
+                aborted: true,
+                ..Default::default()
+            }),
             Some(Err(e)) if !partial.is_empty() => {
                 let _ = tx.send(json!({"error": generation_error_message(&e)}).to_string());
-                Ok(StreamOutcome { content: partial, aborted: true, ..Default::default() })
+                Ok(StreamOutcome {
+                    content: partial,
+                    aborted: true,
+                    ..Default::default()
+                })
             }
             Some(result) => result,
         };
 
         match result {
             Ok(StreamOutcome { content, usage, .. }) if !content.is_empty() => {
-                let processed = apply_output_regex(&content, &regex_scripts);
+                let mut processed = apply_output_regex(&content, &regex_scripts);
+                for token in ["{{user}}", "{{User}}", "{{USER}}"] {
+                    processed = processed.replace(token, &user_name);
+                }
+                for token in ["{{char}}", "{{Char}}", "{{CHAR}}"] {
+                    processed = processed.replace(token, &char_name);
+                }
                 let mem = st2.memory.lock().unwrap_or_else(|e| e.into_inner());
-                if let Err(e) = mem.commit_chat_turn(&active_chat, &card_key, &input,
-                    &content, expected_last_id, req.regenerate) {
+                if let Err(e) = mem.commit_chat_turn(
+                    &active_chat,
+                    &card_key,
+                    &input,
+                    &processed,
+                    expected_last_id,
+                    req.regenerate,
+                ) {
                     let _ = tx.send(json!({"error":format!("保存对话失败：{e:#}")}).to_string());
                     let _ = tx.send("[DONE]".into());
                     return;
@@ -1140,7 +1212,9 @@ fn apply_output_regex(input: &str, scripts: &[RegexScript]) -> String {
     scripts
         .iter()
         .filter(|s| {
-            !s.disabled && !s.prompt_only && !s.find_regex.trim().is_empty()
+            !s.disabled
+                && !s.prompt_only
+                && !s.find_regex.trim().is_empty()
                 && (s.placement.is_empty() || s.placement.contains(&2))
         })
         .fold(input.to_string(), |text, script| {
@@ -1229,7 +1303,14 @@ pub async fn create_chat(
     match mem.create_chat(&id, &card.id, title) {
         Ok(chat) => {
             if !card.first_mes.trim().is_empty() {
-                let _ = mem.add_chat_message(&id, &card.id, "assistant", &card.first_mes);
+                let mut first = card.first_mes.clone();
+                for token in ["{{user}}", "{{User}}", "{{USER}}"] {
+                    first = first.replace(token, "用户");
+                }
+                for token in ["{{char}}", "{{Char}}", "{{CHAR}}"] {
+                    first = first.replace(token, &card.name);
+                }
+                let _ = mem.add_chat_message(&id, &card.id, "assistant", &first);
             }
             Json(json!(chat))
         }
@@ -1290,12 +1371,18 @@ pub async fn set_connection(
         return Json(json!({"error":"不支持的服务类型"}));
     }
     cfg.base_url = cfg.base_url.trim().trim_end_matches('/').to_string();
-    let valid_url = reqwest::Url::parse(&cfg.base_url).is_ok_and(|url|
-        matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
-        && url.username().is_empty() && url.password().is_none()
-        && url.query().is_none() && url.fragment().is_none());
+    let valid_url = reqwest::Url::parse(&cfg.base_url).is_ok_and(|url| {
+        matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
     if !valid_url {
-        return Json(json!({"error":"Base URL 必须是有效的 HTTP/HTTPS 地址，不能包含凭据、查询或片段"}));
+        return Json(
+            json!({"error":"Base URL 必须是有效的 HTTP/HTTPS 地址，不能包含凭据、查询或片段"}),
+        );
     }
     cfg.model = cfg.model.trim().to_string();
     cfg.summary_model = cfg.summary_model.trim().to_string();
@@ -1412,7 +1499,8 @@ mod compatibility_tests {
     fn remote_provider_never_uses_ollama_native_endpoint() {
         let settings: ConnectionSettings = serde_json::from_value(json!({
             "provider":"openai", "base_url":"https://example.com/v1", "model":"test"
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(!uses_native_ollama(&settings, true));
         assert_eq!(api_base_url(&settings, false), "https://example.com/v1");
     }
@@ -1422,13 +1510,16 @@ mod compatibility_tests {
         let card = zhuo_card::Card::from_json(json!({"name":"test", "character_book":{
             "scan_depth":1, "entries":[{"id":"secret", "keys":["Rose"],
                 "secondary_keys":["garden"], "selective":true, "case_sensitive":true,
-                "content":"secret rule"}]}})).unwrap();
+                "content":"secret rule"}]}}))
+        .unwrap();
         let miss = vec!["Rose garden".to_string(), "rose garden".to_string()];
         let hit = vec!["Rose garden".to_string()];
         let entries = card_lore_entries(&card, "", None, &[], &[], Some(&miss));
         assert!(!entries.iter().any(|e| e.content == "secret rule"));
         let entries = card_lore_entries(&card, "", None, &[], &[], Some(&hit));
-        assert!(entries.iter().any(|e| e.content == "secret rule" && e.constant));
+        assert!(entries
+            .iter()
+            .any(|e| e.content == "secret rule" && e.constant));
     }
 
     #[test]
@@ -1478,7 +1569,9 @@ mod compatibility_tests {
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                .unwrap();
             let mut request = Vec::new();
             while !request.windows(4).any(|part| part == b"\r\n\r\n") {
                 let mut chunk = [0; 1024];
