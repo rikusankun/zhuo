@@ -649,13 +649,27 @@ mod tests {
 
     #[test]
     fn real_sillytavern_card_roundtrip() {
-        let png_path = "../../examples/sophie.png";
-        let png_bytes = std::fs::read(png_path).expect("read sophie.png");
+        // 使用测试工具函数创建一个带有 V2 角色卡的 PNG（模拟 SillyTavern 导出）
+        let v2_card = serde_json::json!({
+            "spec": "chara_card_v2",
+            "spec_version": "2.0",
+            "data": {
+                "name": "苏菲PNG",
+                "description": "你是苏菲，冬堡学院的学生。（PNG 内嵌卡）",
+                "first_mes": "……要来串冰糖葫芦吗？我多买了一串。",
+                "mes_example": "<START>",
+                "personality": "安静、观察力强、对甜食没有抵抗力",
+                "scenario": "冬堡集市，黄昏，刚下过雪",
+                "creator_notes": "zhuo MVP 测试卡（V2）"
+            }
+        });
+        let png_bytes = make_png(Some(
+            &base64::engine::general_purpose::STANDARD.encode(v2_card.to_string())
+        ));
         
         // 1. 读取并解析原始卡
-        let card = load_card(png_path).expect("load original card");
+        let card = Card::from_json(parse_card_bytes(&png_bytes).unwrap()).expect("load original card");
         println!("原始卡: name={}, desc={}, id={}", card.name, card.description, card.id);
-        // 实际 sophie.png 里的 name 是 "苏菲PNG"
         assert_eq!(card.name, "苏菲PNG");
         assert!(card.description.contains("冬堡学院"));
         
@@ -677,7 +691,7 @@ mod tests {
         assert_eq!(verified.first_mes, modified.first_mes);
         
         // 5. 验证原始文件未被破坏（重新读取原文件对比）
-        let original_again = load_card(png_path).unwrap();
+        let original_again = Card::from_json(parse_card_bytes(&png_bytes).unwrap()).unwrap();
         assert_eq!(original_again.name, card.name);
         assert_eq!(original_again.description, card.description);
         
