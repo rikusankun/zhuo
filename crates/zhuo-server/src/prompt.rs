@@ -15,6 +15,9 @@ pub fn system_prompt(card: &Card, _world: &str) -> String {
 }
 
 pub fn minimal_system_prompt(card: &Card, persona: Option<(&str, &str)>) -> String {
+    // 硬约束：禁止模型代替用户说话（最高优先级，必须完整保留）
+    const WRITING_RULES: &str = "\n[写作规则]\n只描写你自己（角色）的语言、动作、心理与环境。\n严禁代替用户说话、行动或做决定；写到该由用户反应的地方就停下，把选择权交回用户。\n输出中不要使用 {{user}}、{{char}} 等占位符，直接写名字。";
+
     let mut parts = vec![format!(
         "扮演「{}」，保持角色一致并自然回应。",
         card.name.trim()
@@ -61,6 +64,10 @@ pub fn minimal_system_prompt(card: &Card, persona: Option<(&str, &str)>) -> Stri
         }
         system.push_str(separator);
         system.extend(part.chars().take(available));
+    }
+    // 硬约束：禁止模型代替用户说话（必须完整保留，不受 MAX_SYSTEM_CHARS 限制）
+    if !system.contains("严禁代替用户") {
+        system.push_str(WRITING_RULES);
     }
     system
 }
@@ -453,5 +460,22 @@ mod tests {
         );
         assert!(system.contains("Traveler"));
         assert!(system.chars().count() <= MAX_SYSTEM_CHARS);
+    }
+
+    #[test]
+    fn minimal_system_prompt_contains_no_user_impersonation_rule() {
+        let system = minimal_system_prompt(&card(), None);
+        assert!(
+            system.contains("严禁代替用户"),
+            "system prompt 必须包含禁止代替用户的硬约束规则"
+        );
+        assert!(
+            system.contains("{{user}}"),
+            "规则中应保留 {{user}} 字面量作为示例"
+        );
+        assert!(
+            system.contains("{{char}}"),
+            "规则中应保留 {{char}} 字面量作为示例"
+        );
     }
 }
