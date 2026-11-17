@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Bot, Brain, Check, Copy, Database, Menu, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search, Send, Settings, SlidersHorizontal, Sparkles, Square, Trash2, Upload, UserRound, X } from 'lucide-react';
+import { BookOpen, Bot, Brain, Check, Copy, Database, FileText, Menu, MessageCircle, MoreHorizontal, Plus, RefreshCw, Search, Send, Settings, SlidersHorizontal, Sparkles, Square, Trash2, Upload, UserRound, X } from 'lucide-react';
 import { api, isApiError, type Card, type Connection, type Lore, type Memory, type RegexScript } from './api/client';
 import { useConversation } from './hooks/useConversation';
 import { readPersona, readLore, saveLocal } from './lib/storage';
@@ -18,8 +18,11 @@ export default function App(){
   const [lore,setLore]=useState<Lore[]>(readLore);
   const [compat,setCompat]=useState({worldbook:0,regex:0});
   const [regexScripts,setRegexScripts]=useState<RegexScript[]>([]);
-  const [memories,setMemories]=useState<Memory[]>([]),[memoryTotal,setMemoryTotal]=useState(0),[stateText,setStateText]=useState('{}');
-  const log=useRef<HTMLDivElement>(null),fileInput=useRef<HTMLInputElement>(null),worldInput=useRef<HTMLInputElement>(null),presetInput=useRef<HTMLInputElement>(null),regexInput=useRef<HTMLInputElement>(null),gpuSaveTimer=useRef<number|null>(null);
+    const [memories,setMemories]=useState<Memory[]>([]),[memoryTotal,setMemoryTotal]=useState(0),[stateText,setStateText]=useState('{}');
+    const [workingMemory,setWorkingMemory]=useState('');
+    const [authorNoteContent,setAuthorNoteContent]=useState('');
+    const [authorNoteDepth,setAuthorNoteDepth]=useState(0);
+    const log=useRef<HTMLDivElement>(null),fileInput=useRef<HTMLInputElement>(null),worldInput=useRef<HTMLInputElement>(null),presetInput=useRef<HTMLInputElement>(null),regexInput=useRef<HTMLInputElement>(null),gpuSaveTimer=useRef<number|null>(null),workingMemoryTimer=useRef<number|null>(null);
   const {chats,setChats,chatId,setChatId,messages,setMessages,input,setInput,busy,loading,usage,promptChars,promptTokens,abort,newChat,deleteChat,renameChat,send,regenerate}=useConversation(cardId,{persona,lore_entries:lore},regexScripts,setError,setNotice);
   const card=cards.find(x=>x.id===cardId);
   const connectionRef=useRef(connection); connectionRef.current=connection;
@@ -27,7 +30,7 @@ export default function App(){
   const saveQueue=useRef<Promise<void>>(Promise.resolve());
   const filtered=useMemo(()=>cards.filter(x=>`${x.name} ${x.description}`.toLowerCase().includes(search.toLowerCase())),[cards,search]);
 
-  useEffect(()=>{Promise.all([api.cards.list(),api.connection.get(),api.compatibility.get()]).then(([list,cfg,assets])=>{setCards(Array.isArray(list)?list:[]);if(Array.isArray(list)&&list[0])setCardId(list[0].id);if(!isApiError(cfg)&&cfg.connection)setConnection({...defaults,...cfg.connection});if(!isApiError(assets)){setRegexScripts(assets.regex_scripts||[]);setCompat({worldbook:assets.worldbook?.entries?.length||0,regex:assets.regex_scripts?.length||0})}}).catch(()=>setError('无法连接后端，请先运行 npm run start。'))},[]);
+  useEffect(()=>{Promise.all([api.cards.list(),api.connection.get(),api.compatibility.get(),api.authorNote.get()]).then(([list,cfg,assets,an])=>{setCards(Array.isArray(list)?list:[]);if(Array.isArray(list)&&list[0])setCardId(list[0].id);if(!isApiError(cfg)&&cfg.connection)setConnection({...defaults,...cfg.connection});if(!isApiError(assets)){setRegexScripts(assets.regex_scripts||[]);setCompat({worldbook:assets.worldbook?.entries?.length||0,regex:assets.regex_scripts?.length||0})}if(!isApiError(an)){setAuthorNoteContent(an.content||'');setAuthorNoteDepth(an.depth||0)}}).catch(()=>setError('无法连接后端，请先运行 npm run start。'))},[]);
   useEffect(()=>{log.current?.scrollTo({top:log.current.scrollHeight,behavior:'smooth'})},[messages]);
   useEffect(()=>saveLocal('zhuo.persona',persona),[persona]);
   useEffect(()=>saveLocal('zhuo.lore',lore),[lore]);
@@ -61,9 +64,12 @@ export default function App(){
       setMemories(m.memories||[]);setMemoryTotal(m.total||0);setStateText(JSON.stringify(s.state||{},null,2));
     }).catch(e=>{if(version===memoryRequest.current)setError(String(e))});
   }
-  useEffect(()=>{setMemories([]);setMemoryTotal(0);setStateText('{}');if(panel==='memory')loadMemory();return()=>{memoryRequest.current++}},[panel,cardId]);
+  useEffect(()=>{setWorkingMemory('');if(chatId)loadWorkingMemory();return()=>{if(workingMemoryTimer.current!==null)clearTimeout(workingMemoryTimer.current)}},[chatId]);
   async function saveState(){try{const state=JSON.parse(stateText);if(!state||Array.isArray(state)||typeof state!=='object')throw new Error('state must be an object');const x=await api.state.save(cardId,state);if(isApiError(x))setError(x.error);else setNotice('角色状态已保存')}catch{setError('角色状态必须是合法 JSON 对象')}}
-  const panelButton=(kind:typeof panel,icon:React.ReactNode,label:string)=><button className={`icon-button ${panel===kind?'active':''}`} onClick={()=>setPanel(panel===kind?null:kind)} title={label}>{icon}</button>;
+    async function saveWorkingMemory(){if(!chatId)return;try{await api.workingMemory.save(chatId,workingMemory);setNotice('工作记忆已保存')}catch(e){setError(`保存工作记忆失败：${String(e)}`)}}
+        async function loadWorkingMemory(){if(!chatId)return;try{const res=await fetch(`/api/working-memory?chat=${encodeURIComponent(chatId)}`);if(res.ok){const data=await res.json();if(!data.error)setWorkingMemory(data.content||'')}}catch(e){setError(`加载工作记忆失败：${String(e)}`)}}
+        async function saveAuthorNote(){try{await api.authorNote.save(authorNoteContent,authorNoteDepth);setNotice('作者注释已保存')}catch(e){setError(`保存作者注释失败：${String(e)}`)}}
+        const panelButton=(kind:typeof panel,icon:React.ReactNode,label:string)=><button className={`icon-button ${panel===kind?'active':''}`} onClick={()=>setPanel(panel===kind?null:kind)} title={label}>{icon}</button>;
 
   return <div className="app-shell">
     <aside className={`left-sidebar ${mobile?'mobile-open':''}`}>
@@ -103,14 +109,18 @@ export default function App(){
         <label>Repetition Penalty<input type="number" min="0" max="2" step="0.05" value={connection.repetition_penalty} onChange={e=>setConnection({...connection,repetition_penalty:Number(e.target.value)})}/></label>
         <label>最大输出 Tokens<input type="number" value={connection.max_tokens} onChange={e=>setConnection({...connection,max_tokens:Number(e.target.value)})}/></label>
         <button className="primary wide" onClick={()=>void saveConnection()}>{saved?<Check size={16}/>:<Settings size={16}/>}保存设置</button>
-        <Title icon={<Sparkles/>}>SillyTavern 资产</Title>
+                <Title icon={<FileText/>}>作者注释</Title>
+                <label>内容<textarea rows={4} value={authorNoteContent} onChange={e=>setAuthorNoteContent(e.target.value)} placeholder="保持角色扮演风格..."/></label>
+                <label>注入深度 <b>{authorNoteDepth}</b><input type="range" min="0" max="5" step="1" value={authorNoteDepth} onChange={e=>setAuthorNoteDepth(Number(e.target.value))}/><small>0=最新消息后，5=最远</small></label>
+                <button className="secondary wide" onClick={saveAuthorNote}>保存作者注释</button>
+                <Title icon={<Sparkles/>}>SillyTavern 资产</Title>
         <input ref={worldInput} hidden type="file" accept=".json" onChange={e=>{importAsset('worldbook',e.target.files?.[0]);e.currentTarget.value=''}}/>
         <input ref={presetInput} hidden type="file" accept=".json" onChange={e=>{importAsset('preset',e.target.files?.[0]);e.currentTarget.value=''}}/>
         <input ref={regexInput} hidden type="file" accept=".json" onChange={e=>{importAsset('regex',e.target.files?.[0]);e.currentTarget.value=''}}/>
         <div className="compat-grid"><button onClick={()=>worldInput.current?.click()}><BookOpen/>导入世界书<small>{compat.worldbook} 条</small></button><button onClick={()=>presetInput.current?.click()}><SlidersHorizontal/>导入预设</button><button onClick={()=>regexInput.current?.click()}><RefreshCw/>导入 Regex<small>{compat.regex} 条</small></button><button onClick={()=>exportCard('json')}><Database/>导出 V2 JSON</button><button onClick={()=>exportCard('png')}><Sparkles/>导出 V2 PNG</button></div>
       </div>}
       {panel==='context'&&<div className="panel-scroll form-stack"><Title icon={<UserRound/>}>当前 Persona</Title><Field label="名称" value={persona.name} set={v=>setPersona({...persona,name:v})}/><label>描述<textarea rows={5} value={persona.description} onChange={e=>setPersona({...persona,description:e.target.value})} placeholder="身份、外观、说话方式和背景…"/></label><div className="panel-section-title split"><span><BookOpen/>World Info</span><button onClick={()=>setLore(a=>[...a,{id:crypto.randomUUID(),keys:'',content:'',enabled:true}])}><Plus size={15}/>条目</button></div>{lore.map(x=><div className="lore-card" key={x.id}><div className="lore-top"><button className={`switch ${x.enabled?'on':''}`} onClick={()=>setLore(a=>a.map(v=>v.id===x.id?{...v,enabled:!v.enabled}:v))}><i/></button><span>{x.enabled?'已启用':'已停用'}</span><button className="danger-icon" onClick={()=>setLore(a=>a.filter(v=>v.id!==x.id))}><Trash2 size={14}/></button></div><input value={x.keys} onChange={e=>setLore(a=>a.map(v=>v.id===x.id?{...v,keys:e.target.value}:v))} placeholder="触发词，用逗号分隔"/><textarea rows={4} value={x.content} onChange={e=>setLore(a=>a.map(v=>v.id===x.id?{...v,content:e.target.value}:v))} placeholder="命中后注入的世界设定…"/></div>)}{!lore.length&&<Empty icon={<BookOpen/>} text="暂无 World Info 条目"/>}</div>}
-      {panel==='memory'&&<div className="panel-scroll form-stack"><div className="metric-row"><div><span>长期记忆</span><strong>{memoryTotal}</strong></div><div><span>当前消息</span><strong>{messages.length}</strong></div></div><div className="panel-section-title split"><span><Brain/>记忆库</span><button onClick={loadMemory}><RefreshCw size={14}/>刷新</button></div><div className="memory-list">{memories.map(x=><div key={x.id}><p>{x.summary}</p><small>{x.source_round?`自动提取 #${x.source_round}`:'手动添加'} · {x.created_at}</small></div>)}{!memories.length&&<Empty icon={<Brain/>} text="还没有长期记忆"/>}</div><Title icon={<Database/>}>角色状态 JSON</Title><textarea className="code-editor" rows={10} value={stateText} onChange={e=>setStateText(e.target.value)}/><button className="secondary wide" onClick={saveState}>保存角色状态</button></div>}
+      {panel==='memory'&&<div className="panel-scroll form-stack"><div className="metric-row"><div><span>长期记忆</span><strong>{memoryTotal}</strong></div><div><span>当前消息</span><strong>{messages.length}</strong></div></div><div className="panel-section-title split"><span><Brain/>记忆库</span><button onClick={loadMemory}><RefreshCw size={14}/>刷新</button></div><div className="memory-list">{memories.map(x=><div key={x.id}><p>{x.summary}</p><small>{x.source_round?`自动提取 #${x.source_round}`:'手动添加'} · {x.created_at}</small></div>)}{!memories.length&&<Empty icon={<Brain/>} text="还没有长期记忆"/>}</div><Title icon={<FileText/>}>工作记忆</Title><textarea className="code-editor" rows={8} placeholder="当前会话的临时笔记，切换会话不共享，不计入长期记忆" onChange={e=>{setWorkingMemory(e.target.value);if(workingMemoryTimer.current!==null)clearTimeout(workingMemoryTimer.current);workingMemoryTimer.current=setTimeout(()=>saveWorkingMemory(),500)}} onBlur={saveWorkingMemory} value={workingMemory}/><small className="settings-help">失焦或停止输入 500ms 后自动保存。切换会话时自动加载对应记忆。</small><Title icon={<Database/>}>角色状态 JSON</Title><textarea className="code-editor" rows={10} value={stateText} onChange={e=>setStateText(e.target.value)}/><button className="secondary wide" onClick={saveState}>保存角色状态</button></div>}
     </aside>}
     {createDialog&&<div className="create-modal-backdrop"><form className="create-modal form-stack" onSubmit={e=>{e.preventDefault();void createCard()}}><div className="create-modal-head"><div><strong>新建角色</strong><span>创建一个本地角色卡</span></div><button type="button" onClick={()=>setCreateDialog(false)} aria-label="关闭"><X size={18}/></button></div><label>角色名称<input autoFocus required maxLength={100} value={newRole.name} onChange={e=>setNewRole({...newRole,name:e.target.value})} placeholder="例如：林间旅人"/></label><label>角色背景<textarea rows={3} value={newRole.description} onChange={e=>setNewRole({...newRole,description:e.target.value})} placeholder="简单介绍角色的身份与背景"/></label><label>开场白<textarea rows={3} value={newRole.first_mes} onChange={e=>setNewRole({...newRole,first_mes:e.target.value})} placeholder="角色第一次对用户说的话"/></label><label>角色指令<textarea rows={4} value={newRole.system_prompt} onChange={e=>setNewRole({...newRole,system_prompt:e.target.value})} placeholder="角色的性格、行为和回复要求"/></label><div className="create-modal-actions"><button type="button" className="secondary" onClick={()=>setCreateDialog(false)}>取消</button><button type="submit" className="primary" disabled={!newRole.name.trim()}>创建角色</button></div></form></div>}
     {mobile&&<button className="backdrop" onClick={()=>setMobile(false)} aria-label="关闭导航"/>}

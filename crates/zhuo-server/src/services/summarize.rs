@@ -6,12 +6,15 @@
 //! - 锁全部用 `unwrap_or_else(|e| e.into_inner())`，锁中毒也恢复而不是崩。
 
 use anyhow::Result;
+use serde_json::Value;
 use zhuo_llm::{Msg, StreamConfig};
 
 use crate::services::memory_service;
 use crate::state::ServerState;
 
 const EXTRACT_SYSTEM: &str = "你是对话记忆压缩器。你会收到一段角色扮演对话的记录，把它提炼成 1~2 句第三人称中文事实陈述，只保留持久事实（喜好、身份、关系、发生的事件），忽略寒暄与一次性问答。只输出陈述文本，不要续写对话。";
+
+const STATE_EXTRACT_SYSTEM: &str = "你是角色状态提取器。从对话中提取角色状态的变更（背包、位置、好感度、装备、金钱等），仅输出变化的字段，JSON 格式。例如：{\"背包\":[\"铁剑\",\"药水\"],\"位置\":\"集市\",\"好感度\":10}。不变的字段不要输出。";
 
 /// 组装提取 prompt。要点：
 /// 1. 不用 `[user]/[assistant]` 这类形似 chat 模板的前缀——0.5B 小模型会把它当对话续写；
@@ -33,6 +36,27 @@ fn extract_prompt(transcript: &str) -> Vec<Msg> {
     let user =
         format!("对话记录：\n{lines}\n\n请把以上对话提炼成 1~2 句第三人称事实陈述，直接输出：");
     vec![Msg::system(EXTRACT_SYSTEM), Msg::user(user)]
+}
+
+/// 组装状态提取 prompt
+fn state_extract_prompt(transcript: &str, current_state: &str) -> Vec<Msg> {
+    let lines = transcript
+        .lines()
+        .map(|l| {
+            if let Some(r) = l.strip_prefix("[user] ") {
+                format!("用户说：{r}")
+            } else if let Some(r) = l.strip_prefix("[assistant] ") {
+                format!("角色说：{r}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let user = format!(
+        "当前状态：{current_state}\n\n对话记录：\n{lines}\n\n请提取状态变更，仅输出变化字段的 JSON："
+    );
+    vec![Msg::system(STATE_EXTRACT_SYSTEM), Msg::user(user)]
 }
 
 /// 从碎 JSON 里收割指定 key 的字符串值。
@@ -224,7 +248,123 @@ pub async fn run_extraction(st: &ServerState, card: &str) -> Result<Option<Strin
     if !inserted {
         eprintln!("[summarize] {card}: extraction batch already committed at message {upto_id}");
     }
+
+    // 5) 状态自动提取：每 N 轮对话后，从最新对话中提取状态变更并合并到现有 state
+    // 使用 state_extract_rounds 阈值（默认与 summary_rounds 一致）
+    let state_rounds = st.state_extract_rounds;
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    let state_count = mem.count_unprocessed(card)?;
+    drop(mem);
+    if state_count >= state_rounds {
+        // Spawn a separate task for state extraction to not block
+        let st_clone = st.clone();
+        let card_clone = card.to_string();
+        let transcript_clone = transcript.clone();
+        tokio::spawn(async move {
+            if let Err(e) = extract_and_update_state(&st_clone, &card_clone, &transcript_clone).await {
+                eprintln!("[summarize] {card_clone}: 状态提取失败(已跳过): {e:#}");
+            }
+        });
+    }
+
     Ok(Some(summary))
+}
+
+/// Extract state changes from transcript and merge with existing state.
+async fn extract_and_update_state(st: &ServerState, card: &str, transcript: &str) -> Result<()> {
+    let connection = crate::routes::connection_settings(st);
+    let native = crate::routes::uses_native_ollama(&connection, st.ollama_native);
+    let base_url = crate::routes::api_base_url(&connection, native);
+    if connection.summary_model.trim().is_empty() {
+        return Ok(());
+    }
+
+    // Get current state
+    let current_state = {
+        let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+        mem.get_state(card)?
+    };
+    let current_state_str = current_state
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default())
+        .unwrap_or_else(|| "{}".to_string());
+
+    // Call state extraction model
+    let msgs = state_extract_prompt(transcript, &current_state_str);
+    let cfg = StreamConfig {
+        base_url: base_url.as_str(),
+        api_key: connection.api_key.as_str(),
+        model: connection.summary_model.as_str(),
+        include_usage: false,
+        dump_path: None,
+        response_format: None,
+        temperature: Some(0.0),
+        max_tokens: Some(512),
+        top_p: None,
+        frequency_penalty: None,
+        presence_penalty: None,
+        repetition_penalty: None,
+        num_gpu: (connection.provider == "ollama").then_some(0),
+        ollama_native: native,
+        stop: None,
+    };
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(180),
+        zhuo_llm::stream_chat_ex(&cfg, &msgs, |_| true),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("state extraction timed out"))??;
+
+    // Parse state changes
+    let raw = outcome.content.trim();
+    if raw.is_empty() {
+        return Ok(());
+    }
+    // Strip think block for reasoning models
+    let raw = if let Some(pos) = raw.rfind("</think>") {
+        raw[pos + "</think>".len()..].trim()
+    } else if raw.starts_with("<think") {
+        return Ok(());
+    } else {
+        raw
+    };
+    if raw.is_empty() {
+        return Ok(());
+    }
+
+    // Try to parse JSON
+    let state_changes: Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => {
+            // Try to extract JSON from markdown fences
+            let cleaned = raw
+                .trim_matches(|c| c == '`' || c == '\n')
+                .trim_start_matches("json")
+                .trim();
+            serde_json::from_str(cleaned).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+        }
+    };
+
+    if !state_changes.is_object() || state_changes.as_object().unwrap().is_empty() {
+        return Ok(()); // No changes
+    }
+
+    // Merge with existing state
+    let mut merged = current_state.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(ref mut merged_obj) = merged {
+        if let Value::Object(changes_obj) = state_changes {
+            for (k, v) in changes_obj {
+                merged_obj.insert(k, v);
+            }
+        }
+    }
+
+    // Write back
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    mem.set_state(card, &merged)?;
+    eprintln!("[summarize] {card}: 状态自动更新 -> {}", serde_json::to_string(&merged).unwrap_or_default());
+
+    Ok(())
 }
 
 #[cfg(test)]

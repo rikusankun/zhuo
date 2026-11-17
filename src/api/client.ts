@@ -167,11 +167,25 @@ export const api = {
       ),
   },
   state: {
-    get: (card: string) =>
-      requestJson<{ state?: Record<string, unknown> | null }>(
-        `/api/state?card=${encodeURIComponent(card)}`,
-      ),
-    save: (card: string, state: object) =>
-      requestJson<{ ok: boolean }>('/api/state', jsonBody('PUT', { card, state })),
-  },
-};
+      get: (card: string) =>
+        requestJson<{ state?: Record<string, unknown> | null }>(
+          `/api/state?card=${encodeURIComponent(card)}`,
+        ),
+      save: (card: string, state: object) =>
+        requestJson<{ ok: boolean }>('/api/state', jsonBody('PUT', { card, state })),
+    },
+    workingMemory: {
+        get: (chat: string) =>
+          requestJson<{ chat: string; content: string | null }>(
+            `/api/working-memory?chat=${encodeURIComponent(chat)}`,
+          ),
+        save: (chat: string, content: string) =>
+          requestJson<{ ok: boolean }>('/api/working-memory', jsonBody('PUT', { chat, content })),
+      },
+      authorNote: {
+        get: () =>
+          requestJson<{ content: string | null; depth: number }>('/api/author-note'),
+        save: (content: string, depth: number) =>
+          requestJson<{ ok: boolean }>('/api/author-note', jsonBody('PUT', { content, depth })),
+      },
+    };

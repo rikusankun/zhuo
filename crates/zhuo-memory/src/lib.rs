@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
 );
+
+CREATE TABLE IF NOT EXISTS working_memory (
+    chat_id    TEXT PRIMARY KEY,
+    content    TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+);
 "#;
 
 /// 旧库迁移：给已存在的 messages 表补 processed 列（幂等）。
@@ -485,9 +491,48 @@ impl MemoryStore {
     pub fn delete_chat(&self, id: &str) -> Result<usize> {
         let tx = self.conn.unchecked_transaction()?;
         tx.execute("DELETE FROM messages WHERE chat_id = ?1", [id])?;
+        tx.execute("DELETE FROM working_memory WHERE chat_id = ?1", [id])?;
         let deleted = tx.execute("DELETE FROM chats WHERE id = ?1", [id])?;
         tx.commit()?;
         Ok(deleted)
+    }
+
+    // ---------- Working Memory (per-chat temporary scratchpad) ----------
+
+    /// Get working memory content for a chat session.
+    pub fn get_working_memory(&self, chat_id: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT content FROM working_memory WHERE chat_id = ?1",
+                [chat_id],
+                |r| r.get(0),
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })
+            .context("get working_memory")
+    }
+
+    /// Set (upsert) working memory content for a chat session.
+    pub fn set_working_memory(&self, chat_id: &str, content: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO working_memory (chat_id, content, updated_at)
+             VALUES (?1, ?2, datetime('now','localtime'))
+             ON CONFLICT(chat_id) DO UPDATE SET
+                 content = excluded.content,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![chat_id, content],
+        )?;
+        Ok(())
+    }
+
+    /// Delete working memory for a chat session. Returns number of rows deleted.
+    pub fn delete_working_memory(&self, chat_id: &str) -> Result<usize> {
+        Ok(self
+            .conn
+            .execute("DELETE FROM working_memory WHERE chat_id = ?1", [chat_id])?)
     }
 
     pub fn add_chat_message(
@@ -621,6 +666,19 @@ impl MemoryStore {
             rusqlite::params![key, value],
         )?;
         Ok(())
+    }
+
+    /// Get Author's Note (content and depth) from settings.
+    pub fn get_author_note(&self) -> Result<Option<(String, usize)>> {
+        let content = self.get_setting("author_note_content")?;
+        let depth_str = self.get_setting("author_note_depth")?;
+        match (content, depth_str) {
+            (Some(c), Some(d)) if !c.trim().is_empty() => {
+                let depth = d.parse::<usize>().unwrap_or(0);
+                Ok(Some((c, depth)))
+            }
+            _ => Ok(None),
+        }
     }
 
     // ---------- 未处理游标：后台记忆提取用 ----------
@@ -1934,5 +1992,55 @@ mod tests {
         );
 
         println!("✅ 世界书触发引擎测试通过：zhuo-memory 与 SillyTavern 标准行为一致");
+    }
+
+    #[test]
+    fn working_memory_isolation_per_chat() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat-1", "card-a", "第一幕").unwrap();
+        s.create_chat("chat-2", "card-a", "第二幕").unwrap();
+
+        // 两个不同 chat_id 的工作记忆互不影响
+        s.set_working_memory("chat-1", "chat-1 的临时笔记").unwrap();
+        s.set_working_memory("chat-2", "chat-2 的临时笔记").unwrap();
+
+        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("chat-1 的临时笔记".into()));
+        assert_eq!(s.get_working_memory("chat-2").unwrap(), Some("chat-2 的临时笔记".into()));
+    }
+
+    #[test]
+    fn working_memory_empty_not_injected() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat-1", "card-a", "第一幕").unwrap();
+
+        // 未设置时返回 None
+        assert!(s.get_working_memory("chat-1").unwrap().is_none());
+
+        // 设置为空字符串也应返回 Some("")
+        s.set_working_memory("chat-1", "").unwrap();
+        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("".into()));
+    }
+
+    #[test]
+    fn delete_chat_removes_working_memory() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat-1", "card-a", "第一幕").unwrap();
+        s.set_working_memory("chat-1", "临时笔记").unwrap();
+
+        // 删除聊天后，工作记忆也应被删除
+        s.delete_chat("chat-1").unwrap();
+        assert!(s.get_working_memory("chat-1").unwrap().is_none());
+    }
+
+    #[test]
+    fn working_memory_upsert_updates_content() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.create_chat("chat-1", "card-a", "第一幕").unwrap();
+
+        s.set_working_memory("chat-1", "第一版").unwrap();
+        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("第一版".into()));
+
+        s.set_working_memory("chat-1", "第二版").unwrap();
+        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("第二版".into()));
     }
 }

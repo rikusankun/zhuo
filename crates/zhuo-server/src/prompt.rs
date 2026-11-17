@@ -7,6 +7,8 @@ use zhuo_memory::PromptHit;
 
 pub const MAX_SYSTEM_CHARS: usize = 500;
 pub const MAX_RETRIEVAL_CHARS: usize = 500;
+pub const MAX_WORKING_MEMORY_CHARS: usize = 200;
+pub const MAX_AUTHOR_NOTE_CHARS: usize = 100;
 pub const MAX_PROMPT_CHARS: usize = 1500;
 pub const MAX_HISTORY_MESSAGES: usize = 6;
 
@@ -128,11 +130,13 @@ pub fn retrieval_block(hits: &[PromptHit]) -> Option<String> {
     (block.chars().count() > "[检索到的设定与记忆]\n".chars().count()).then_some(block)
 }
 
-/// Assemble only compact system context, retrieved facts, current state, six messages, and input.
+/// Assemble only compact system context, retrieved facts, working memory, current state, author's note, six messages, and input.
 pub fn assemble_rag_messages(
     system: &str,
     retrieval: Option<&str>,
+    working_memory: Option<&str>,
     state: Option<&str>,
+    author_note: Option<(String, usize)>,
     history: &[Msg],
     input: &str,
 ) -> Vec<Msg> {
@@ -140,9 +144,16 @@ pub fn assemble_rag_messages(
     let mut retrieval = retrieval
         .filter(|text| !text.trim().is_empty())
         .map(|text| truncate(text, MAX_RETRIEVAL_CHARS));
+    let mut working_memory = working_memory
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| truncate(text, MAX_WORKING_MEMORY_CHARS));
     let mut state = state
         .filter(|text| !text.trim().is_empty())
         .map(str::to_string);
+    // Author's Note: truncate to budget
+    let mut author_note = author_note
+        .filter(|(content, _)| !content.trim().is_empty())
+        .map(|(content, depth)| (truncate(&content, MAX_AUTHOR_NOTE_CHARS), depth));
     let mut history = history
         .iter()
         .filter(|message| message.role == "user" || message.role == "assistant")
@@ -156,7 +167,9 @@ pub fn assemble_rag_messages(
     while prompt_chars_parts(
         &system,
         retrieval.as_deref(),
+        working_memory.as_deref(),
         state.as_deref(),
+        author_note.as_ref().map(|(c, _)| c.as_str()),
         &history,
         &input,
     ) > MAX_PROMPT_CHARS
@@ -164,12 +177,21 @@ pub fn assemble_rag_messages(
     {
         history.remove(0);
     }
-    trim_optional(&mut state, &system, retrieval.as_deref(), &history, &input);
-    trim_optional(&mut retrieval, &system, state.as_deref(), &history, &input);
+    // 截断优先级：working_memory > state > retrieval > author_note（保人设和规则）
+    trim_optional(&mut working_memory, &system, retrieval.as_deref(), None, author_note.as_ref().map(|(c, _)| c.as_str()), &history, &input);
+    trim_optional(&mut state, &system, retrieval.as_deref(), working_memory.as_deref(), author_note.as_ref().map(|(c, _)| c.as_str()), &history, &input);
+    trim_optional(&mut retrieval, &system, state.as_deref(), working_memory.as_deref(), author_note.as_ref().map(|(c, _)| c.as_str()), &history, &input);
+    if let Some((ref mut content, _)) = author_note {
+        let mut content_opt = Some(content.clone());
+        trim_optional(&mut content_opt, &system, retrieval.as_deref(), working_memory.as_deref(), None, &history, &input);
+        *content = content_opt.unwrap_or_default();
+    }
     if prompt_chars_parts(
         &system,
         retrieval.as_deref(),
+        working_memory.as_deref(),
         state.as_deref(),
+        author_note.as_ref().map(|(c, _)| c.as_str()),
         &history,
         &input,
     ) > MAX_PROMPT_CHARS
@@ -177,16 +199,43 @@ pub fn assemble_rag_messages(
         let excess = prompt_chars_parts(
             &system,
             retrieval.as_deref(),
+            working_memory.as_deref(),
             state.as_deref(),
+            author_note.as_ref().map(|(c, _)| c.as_str()),
             &history,
             &input,
         ) - MAX_PROMPT_CHARS;
         input = truncate(&input, input.chars().count().saturating_sub(excess));
     }
 
-    let system = combined_system(&system, retrieval.as_deref(), state.as_deref());
+    let system = combined_system(&system, retrieval.as_deref(), working_memory.as_deref(), state.as_deref());
     let mut messages = vec![Msg::system(system)];
-    messages.extend(history);
+    // Inject Author's Note at specified depth
+    if let Some((content, depth)) = author_note {
+        // depth=0: after last user message (closest to generation)
+        // depth=1: after second-to-last user message, etc.
+        // Find user message indices in history
+        let user_indices: Vec<usize> = history
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.role == "user")
+            .map(|(i, _)| i)
+            .collect();
+        if !user_indices.is_empty() {
+            // Clamp depth to available user messages
+            let clamped_depth = depth.min(user_indices.len().saturating_sub(1));
+            let insert_idx = user_indices[user_indices.len().saturating_sub(1).saturating_sub(clamped_depth)] + 1;
+            messages.extend(history[..insert_idx].to_vec());
+            messages.push(Msg::system(content));
+            messages.extend(history[insert_idx..].to_vec());
+        } else {
+            // No user messages in history, append before input
+            messages.extend(history);
+            messages.push(Msg::system(content));
+        }
+    } else {
+        messages.extend(history);
+    }
     messages.push(Msg::user(input));
     messages
 }
@@ -212,13 +261,15 @@ fn trim_optional(
     value: &mut Option<String>,
     system: &str,
     other: Option<&str>,
+    working_memory: Option<&str>,
+    author_note: Option<&str>,
     history: &[Msg],
     input: &str,
 ) {
     let Some(current) = value.as_ref() else {
         return;
     };
-    let total = prompt_chars_parts(system, other, Some(current), history, input);
+    let total = prompt_chars_parts(system, other, working_memory, Some(current), author_note, history, input);
     if total > MAX_PROMPT_CHARS {
         let excess = total - MAX_PROMPT_CHARS;
         *value = Some(truncate(
@@ -231,11 +282,14 @@ fn trim_optional(
 fn prompt_chars_parts(
     system: &str,
     retrieval: Option<&str>,
+    working_memory: Option<&str>,
     state: Option<&str>,
+    author_note: Option<&str>,
     history: &[Msg],
     input: &str,
 ) -> usize {
-    combined_system(system, retrieval, state).chars().count()
+    combined_system(system, retrieval, working_memory, state).chars().count()
+        + author_note.map(|s| s.chars().count()).unwrap_or(0)
         + history
             .iter()
             .map(|message| message.content.chars().count())
@@ -243,9 +297,9 @@ fn prompt_chars_parts(
         + input.chars().count()
 }
 
-fn combined_system(system: &str, retrieval: Option<&str>, state: Option<&str>) -> String {
+fn combined_system(system: &str, retrieval: Option<&str>, working_memory: Option<&str>, state: Option<&str>) -> String {
     let mut combined = system.to_string();
-    for block in [retrieval, state]
+    for block in [retrieval, working_memory, state]
         .into_iter()
         .flatten()
         .filter(|text| !text.trim().is_empty())
@@ -354,7 +408,9 @@ mod tests {
         let messages = assemble_rag_messages(
             &"系统".repeat(250),
             Some(&"检索".repeat(300)),
+            None,
             Some(&"状态".repeat(300)),
+            None,
             &history,
             &"当前".repeat(900),
         );
@@ -381,7 +437,9 @@ mod tests {
         let messages = assemble_rag_messages(
             "base",
             Some("[检索]\n设定"),
+            None,
             Some("[当前状态]\n位置：冬堡"),
+            None,
             &[],
             "hi",
         );
@@ -402,7 +460,7 @@ mod tests {
         let history = (0..10)
             .map(|index| Msg::user(format!("history-{index}")))
             .collect::<Vec<_>>();
-        let messages = assemble_rag_messages("system", None, None, &history, "latest");
+        let messages = assemble_rag_messages("system", None, None, None, None, &history, "latest");
         let retained = messages[1..messages.len() - 1]
             .iter()
             .map(|message| message.content.as_str())
@@ -427,7 +485,7 @@ mod tests {
             Msg::user("previous question"),
             Msg::assistant("previous answer"),
         ];
-        let messages = assemble_rag_messages("compact system", None, None, &history, "latest");
+        let messages = assemble_rag_messages("compact system", None, None, None, None, &history, "latest");
         assert!(messages
             .iter()
             .all(|message| message.content != "old full system prompt"));
@@ -505,6 +563,8 @@ mod tests {
             &minimal_system_prompt(&long_card, Some(("Traveler", &persona_desc))),
             None,
             None,
+            None,
+            None,
             &[],
             "你好",
         );
@@ -566,7 +626,7 @@ mod tests {
         for (name, extra_desc) in cases {
             let card = base_card(extra_desc);
             let messages =
-                assemble_rag_messages(&minimal_system_prompt(&card, None), None, None, &[], "你好");
+                assemble_rag_messages(&minimal_system_prompt(&card, None), None, None, None, None, &[], "你好");
             let system_content = &messages[0].content;
             assert!(
                 system_content.contains("[写作规则]"),

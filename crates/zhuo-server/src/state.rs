@@ -21,6 +21,8 @@ pub struct ServerState {
     pub summary_model: Arc<String>,
     /// 触发提取的未处理消息条数阈值（ZHUO_SUMMARY_ROUNDS，默认 8）
     pub summary_rounds: usize,
+    /// 触发状态提取的未处理消息条数阈值（ZHUO_STATE_EXTRACT_ROUNDS，默认 8）
+    pub state_extract_rounds: usize,
     /// per-card 提取防并发：正在提取的卡集合
     extracting: Arc<Mutex<HashSet<String>>>,
     /// 主模型 GPU 层数（ZHUO_MAIN_NUM_GPU，默认 15；连接设置可动态覆盖）
@@ -88,6 +90,10 @@ impl ServerState {
             memory: Arc::new(Mutex::new(memory)),
             summary_model: Arc::new(std::env::var("ZHUO_SUMMARY_MODEL").unwrap_or_default()),
             summary_rounds: std::env::var("ZHUO_SUMMARY_ROUNDS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(8),
+            state_extract_rounds: std::env::var("ZHUO_STATE_EXTRACT_ROUNDS")
                 .ok()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(8),
@@ -257,6 +263,7 @@ mod tests {
             memory: Arc::new(Mutex::new(memory)),
             summary_model: Arc::new("environment-summary".into()),
             summary_rounds: 4,
+            state_extract_rounds: 4,
             extracting: Arc::new(Mutex::new(HashSet::new())),
             main_num_gpu: 15,
             ollama_native: true,

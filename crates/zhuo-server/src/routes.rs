@@ -326,6 +326,29 @@ pub struct SetStateRequest {
     pub state: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+pub struct WorkingMemoryRequest {
+    pub chat: String,
+    pub content: String,
+}
+
+#[derive(Deserialize)]
+pub struct WorkingMemoryQuery {
+    pub chat: String,
+}
+
+#[derive(Deserialize)]
+pub struct AuthorNoteRequest {
+    pub content: String,
+    pub depth: usize,
+}
+
+#[derive(Serialize)]
+pub struct AuthorNoteResponse {
+    pub content: Option<String>,
+    pub depth: usize,
+}
+
 fn prompt_payload(
     hits: &[zhuo_memory::PromptHit],
     prompt_chars: usize,
@@ -1013,6 +1036,16 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             Ok(state) => state.and_then(|state| render_state(&state)),
             Err(e) => return sse_error(format!("read character state: {e:#}")),
         };
+        // Working Memory: per-chat temporary scratchpad
+        let working_memory = match mem.get_working_memory(&chat_id) {
+            Ok(Some(content)) if !content.trim().is_empty() => Some(content),
+            _ => None,
+        };
+        // Author's Note: global setting, injected at specified depth
+        let author_note = match mem.get_author_note() {
+            Ok(Some((content, depth))) if !content.trim().is_empty() => Some((content, depth)),
+            _ => None,
+        };
         let persona = req
             .persona
             .as_ref()
@@ -1021,7 +1054,9 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         let messages = assemble_rag_messages(
             &system,
             retrieval.as_deref(),
+            working_memory.as_deref(),
             state.as_deref(),
+            author_note,
             &history,
             &req.message,
         );
@@ -1482,6 +1517,59 @@ pub async fn set_state(
         Ok(()) => Json(json!({"ok": true, "card": key, "state": req.state})),
         Err(e) => Json(json!({"error": format!("{e:#}")})),
     }
+}
+
+/// GET /api/working-memory?chat=<id> —— 读取工作记忆
+pub async fn get_working_memory(
+    State(st): State<ServerState>,
+    Query(q): Query<WorkingMemoryQuery>,
+) -> Json<serde_json::Value> {
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    match mem.get_working_memory(&q.chat) {
+        Ok(Some(content)) => Json(json!({"chat": q.chat, "content": content})),
+        Ok(None) => Json(json!({"chat": q.chat, "content": null})),
+        Err(e) => Json(json!({"error": format!("{e:#}")})),
+    }
+}
+
+/// PUT /api/working-memory?chat=<id> —— 保存工作记忆
+pub async fn set_working_memory(
+    State(st): State<ServerState>,
+    Json(req): Json<WorkingMemoryRequest>,
+) -> Json<serde_json::Value> {
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    match mem.set_working_memory(&req.chat, &req.content) {
+        Ok(()) => Json(json!({"ok": true, "chat": req.chat, "content": req.content})),
+        Err(e) => Json(json!({"error": format!("{e:#}")})),
+    }
+}
+
+/// GET /api/author-note —— 读取作者注释
+pub async fn get_author_note(
+    State(st): State<ServerState>,
+) -> Json<serde_json::Value> {
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    match mem.get_author_note() {
+        Ok(Some((content, depth))) => Json(json!({"content": content, "depth": depth})),
+        Ok(None) => Json(json!({"content": null, "depth": 0})),
+        Err(e) => Json(json!({"error": format!("{e:#}")})),
+    }
+}
+
+/// PUT /api/author-note —— 保存作者注释
+pub async fn set_author_note(
+    State(st): State<ServerState>,
+    Json(req): Json<AuthorNoteRequest>,
+) -> Json<serde_json::Value> {
+    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
+    let depth = req.depth.clamp(0, 5);
+    if let Err(e) = mem.set_setting("author_note_content", &req.content) {
+        return Json(json!({"error": format!("{e:#}")}));
+    }
+    if let Err(e) = mem.set_setting("author_note_depth", &depth.to_string()) {
+        return Json(json!({"error": format!("{e:#}")}));
+    }
+    Json(json!({"ok": true, "content": req.content, "depth": depth}))
 }
 
 /// GET / —— 健康检查
