@@ -167,6 +167,8 @@ fn default_num_gpu() -> i64 {
     15
 }
 
+const DEFAULT_USER_NAME: &str = "旅人";
+
 fn ollama_root(base_url: &str) -> String {
     base_url
         .trim()
@@ -1052,7 +1054,7 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             card.name.clone(),
             persona
                 .map(|(n, _)| n.to_string())
-                .unwrap_or_else(|| "用户".to_string()),
+                .unwrap_or_else(|| DEFAULT_USER_NAME.to_string()),
         )
     };
 
@@ -1097,7 +1099,6 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             format!("\n{}：", char_name),
         ]
         .into_iter()
-        .take(4)
         .collect();
         let cfg = StreamConfig {
             base_url: base.as_str(),
@@ -1318,7 +1319,7 @@ pub async fn create_chat(
             if !card.first_mes.trim().is_empty() {
                 let mut first = card.first_mes.clone();
                 for token in ["{{user}}", "{{User}}", "{{USER}}"] {
-                    first = first.replace(token, "用户");
+                    first = first.replace(token, DEFAULT_USER_NAME);
                 }
                 for token in ["{{char}}", "{{Char}}", "{{CHAR}}"] {
                     first = first.replace(token, &card.name);

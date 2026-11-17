@@ -43,6 +43,10 @@ impl Msg {
     }
 }
 
+fn is_stop_none(stop: &Option<&[String]>) -> bool {
+    stop.as_ref().is_none_or(|s| s.is_empty())
+}
+
 #[derive(Serialize)]
 struct ChatReq<'a> {
     model: &'a str,
@@ -68,8 +72,8 @@ struct ChatReq<'a> {
     /// OpenAI 官方端点不认识该字段，仅在本地 Ollama 目标上发送。
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<ChatOptions>,
-    /// 停止串：OpenAI 兼容层最多 4 个，请调用方自行截断。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// 停止串：OpenAI 兼容层最多 4 个，内部自动截断；Ollama 原生无此限制。
+    #[serde(skip_serializing_if = "is_stop_none")]
     stop: Option<&'a [String]>,
 }
 
@@ -248,7 +252,7 @@ pub struct StreamConfig<'a> {
     /// 停止串：模型生成到任一序列即截断（含序列自身）。
     /// 建议：["\n{user_name}:", "\n{user_name}：", "\n{char_name}:", "\n{char_name}："]。
     /// 带 \n 前缀和冒号后缀，只匹配发言标记，不会把角色名字出现在对话正文中时误切。
-    /// OpenAI 兼容层最多 4 个，请调用方自行截断；Ollama 原生无此限制。
+    /// OpenAI 兼容层最多 4 个，内部自动截断；Ollama 原生无此限制。
     pub stop: Option<&'a [String]>,
 }
 
@@ -434,6 +438,7 @@ pub async fn stream_chat_ex_with_first_token_timeout(
     let body = if native {
         ollama_native_body(cfg, messages, cfg.num_gpu.unwrap())
     } else {
+        let stop = cfg.stop.map(|s| &s[..s.len().min(4)]);
         serde_json::to_value(ChatReq {
             model: cfg.model,
             messages,
@@ -449,7 +454,7 @@ pub async fn stream_chat_ex_with_first_token_timeout(
             presence_penalty: cfg.presence_penalty,
             repetition_penalty: cfg.repetition_penalty,
             options: cfg.num_gpu.map(|n| ChatOptions { num_gpu: n }),
-            stop: cfg.stop,
+            stop,
         })?
     };
     let mut client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
@@ -1237,5 +1242,153 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(result.content, "首尾");
+    }
+
+    /// 兼容通道发送 stop strings：请求体 options.stop 等于传入数组
+    #[tokio::test]
+    async fn compat_channel_sends_stop_strings() {
+        let (base, captured) = capture_mock_server(sse(&[&delta("好")])).await;
+        let stop_strings = vec!["\n旅人:".into(), "\n旅人：".into()];
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+            stop: Some(&stop_strings),
+        };
+        let _ = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
+            .await
+            .unwrap();
+        let req = request_json(&captured);
+        let stop = req.get("stop").expect("stop 字段应存在");
+        assert_eq!(stop, &serde_json::json!(stop_strings));
+    }
+
+    /// stop = None 时请求体不含 stop 字段
+    #[tokio::test]
+    async fn stop_none_omits_field() {
+        let (base, captured) = capture_mock_server(sse(&[&delta("好")])).await;
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+            stop: None,
+        };
+        let _ = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
+            .await
+            .unwrap();
+        let req = request_json(&captured);
+        assert!(
+            !req.as_object().unwrap().contains_key("stop"),
+            "stop=None 时不应有 stop 字段: {:?}",
+            req
+        );
+    }
+
+    /// stop = Some(&[]) 空切片时请求体不含 stop 字段
+    #[tokio::test]
+    async fn stop_empty_omits_field() {
+        let (base, captured) = capture_mock_server(sse(&[&delta("好")])).await;
+        let empty: &[String] = &[];
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+            stop: Some(empty),
+        };
+        let _ = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
+            .await
+            .unwrap();
+        let req = request_json(&captured);
+        assert!(
+            !req.as_object().unwrap().contains_key("stop"),
+            "stop=Some(&[]) 时不应有 stop 字段: {:?}",
+            req
+        );
+    }
+
+    /// OpenAI 兼容路径：传 6 个 stop strings，请求体只保留前 4 个
+    #[tokio::test]
+    async fn compat_channel_truncates_stop_to_four() {
+        let (base, captured) = capture_mock_server(sse(&[&delta("好")])).await;
+        let stop_strings = vec![
+            "a".into(),
+            "b".into(),
+            "c".into(),
+            "d".into(),
+            "e".into(),
+            "f".into(),
+        ];
+        let cfg = StreamConfig {
+            base_url: &base,
+            api_key: "test-key",
+            model: "mock-model",
+            include_usage: false,
+            dump_path: None,
+            response_format: None,
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
+            repetition_penalty: None,
+            num_gpu: None,
+            ollama_native: false,
+            stop: Some(&stop_strings),
+        };
+        let _ = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
+            .await
+            .unwrap();
+        let req = request_json(&captured);
+        let stop = req
+            .get("stop")
+            .expect("stop 字段应存在")
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            stop.len(),
+            4,
+            "OpenAI 兼容层最多 4 个 stop strings: {:?}",
+            stop
+        );
+        assert_eq!(
+            stop.as_slice(),
+            serde_json::json!(["a", "b", "c", "d"])
+                .as_array()
+                .unwrap()
+                .as_slice()
+        );
     }
 }
