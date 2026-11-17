@@ -197,6 +197,7 @@ pub async fn run_extraction(st: &ServerState, card: &str) -> Result<Option<Strin
         // 提取模型强制走 CPU，避免小模型抢占主模型显存
         num_gpu: (connection.provider == "ollama").then_some(0),
         ollama_native: native,
+        stop: None,
     };
     let outcome = tokio::time::timeout(
         std::time::Duration::from_secs(180),

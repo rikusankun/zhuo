@@ -68,6 +68,9 @@ struct ChatReq<'a> {
     /// OpenAI 官方端点不认识该字段，仅在本地 Ollama 目标上发送。
     #[serde(skip_serializing_if = "Option::is_none")]
     options: Option<ChatOptions>,
+    /// 停止串：OpenAI 兼容层最多 4 个，请调用方自行截断。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stop: Option<&'a [String]>,
 }
 
 #[derive(Serialize)]
@@ -242,6 +245,11 @@ pub struct StreamConfig<'a> {
     /// true = 走 Ollama 原生 `/api/chat`，让 options.num_gpu 真正生效。
     /// Ollama 的 OpenAI 兼容层会丢弃请求体里的 options 字段，不可用。
     pub ollama_native: bool,
+    /// 停止串：模型生成到任一序列即截断（含序列自身）。
+    /// 建议：["\n{user_name}:", "\n{user_name}：", "\n{char_name}:", "\n{char_name}："]。
+    /// 带 \n 前缀和冒号后缀，只匹配发言标记，不会把角色名字出现在对话正文中时误切。
+    /// OpenAI 兼容层最多 4 个，请调用方自行截断；Ollama 原生无此限制。
+    pub stop: Option<&'a [String]>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -310,6 +318,9 @@ fn ollama_native_body(cfg: &StreamConfig<'_>, messages: &[Msg], num_gpu: i64) ->
     }
     if let Some(v) = cfg.repetition_penalty {
         options.insert("repeat_penalty".into(), json!(v));
+    }
+    if let Some(v) = cfg.stop.filter(|s| !s.is_empty()) {
+        options.insert("stop".into(), json!(v));
     }
     let mut body = json!({
         "model": cfg.model,
@@ -438,6 +449,7 @@ pub async fn stream_chat_ex_with_first_token_timeout(
             presence_penalty: cfg.presence_penalty,
             repetition_penalty: cfg.repetition_penalty,
             options: cfg.num_gpu.map(|n| ChatOptions { num_gpu: n }),
+            stop: cfg.stop,
         })?
     };
     let mut client = reqwest::Client::builder().connect_timeout(Duration::from_secs(10));
@@ -591,6 +603,7 @@ pub async fn stream_chat(
         repetition_penalty: None,
         num_gpu: None,
         ollama_native: false,
+        stop: None,
     };
     stream_chat_ex(&cfg, messages, on_token).await.map(|_| ())
 }
@@ -862,6 +875,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: Some(99),
             ollama_native: true,
+            stop: None,
         };
         let err = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
             .await
@@ -910,6 +924,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: None,
             ollama_native: false,
+            stop: None,
         };
         let msgs = vec![Msg::user("hi")];
         let out = stream_chat_ex(&cfg, &msgs, |_| true).await.unwrap();
@@ -969,6 +984,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: None,
             ollama_native: false,
+            stop: None,
         };
         let msgs = vec![Msg::user("hi")];
         let mut seen = 0usize;
@@ -1034,6 +1050,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: Some(0),
             ollama_native: true,
+            stop: None,
         };
         let out = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
             .await
@@ -1078,6 +1095,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: Some(99),
             ollama_native: true,
+            stop: None,
         };
         let out = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
             .await
@@ -1105,6 +1123,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: Some(99),
             ollama_native: false,
+            stop: None,
         };
         let out = stream_chat_ex(&cfg, &[Msg::user("hi")], |_| true)
             .await
@@ -1146,6 +1165,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: None,
             ollama_native: false,
+            stop: None,
         };
         let error = stream_chat_ex_with_first_token_timeout(
             &cfg,
@@ -1206,6 +1226,7 @@ mod tests {
             repetition_penalty: None,
             num_gpu: None,
             ollama_native: false,
+            stop: None,
         };
         let result = stream_chat_ex_with_first_token_timeout(
             &cfg,

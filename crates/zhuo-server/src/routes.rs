@@ -1087,6 +1087,18 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         .unwrap_or_default();
 
     tokio::spawn(async move {
+        // 名字即停止串：模型生成到 "\n{名字}:" 或 "\n{名字}：" 即物理截断，防代笔。
+        // 带 \n 前缀和冒号后缀，只匹配发言标记，不会把角色名字出现在对话正文中时误切。
+        // 中文场景必须加全角冒号变体。
+        let stop_strings: Vec<String> = [
+            format!("\n{}:", user_name),
+            format!("\n{}：", user_name),
+            format!("\n{}:", char_name),
+            format!("\n{}：", char_name),
+        ]
+        .into_iter()
+        .take(4)
+        .collect();
         let cfg = StreamConfig {
             base_url: base.as_str(),
             api_key: key.as_str(),
@@ -1103,6 +1115,7 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             // 主模型按 ZHUO_MAIN_NUM_GPU 分配 GPU 层数（默认 99）
             num_gpu: (connection.provider == "ollama").then_some(connection.num_gpu),
             ollama_native: native,
+            stop: Some(&stop_strings),
         };
         // token 转发；send 失败 = 客户端已断开（点「停止生成」或关页面）→ 返回 false
         // 中断上游 Ollama 请求，已生成的部分内容仍会入库
