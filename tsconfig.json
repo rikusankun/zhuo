@@ -10,7 +10,6 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "sourceMap": true,
-    "baseUrl": "./",
     "types": ["vite/client"],
     "jsx": "react-jsx",
     "noUnusedLocals": true,
