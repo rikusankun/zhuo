@@ -24,7 +24,7 @@ pub struct ServerState {
     /// 触发状态提取的未处理消息条数阈值（ZHUO_STATE_EXTRACT_ROUNDS，默认 8）
     pub state_extract_rounds: usize,
     /// per-card 提取防并发：正在提取的卡集合
-    extracting: Arc<Mutex<HashSet<String>>>,
+    pub extracting: Arc<Mutex<HashSet<String>>>,
     /// 主模型 GPU 层数（ZHUO_MAIN_NUM_GPU，默认 15；连接设置可动态覆盖）
     pub main_num_gpu: i64,
     /// 走 Ollama 原生 /api/chat（默认 true），否则走 /v1/chat/completions

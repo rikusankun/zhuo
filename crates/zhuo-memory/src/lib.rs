@@ -724,7 +724,7 @@ impl MemoryStore {
             .context("mark processed")
     }
 
-    /// 最近写入的记忆列表（调试面板用，id 倒序）
+    /// 最近写入的记忆列表（调试面板用，id 倒序）。已返回 `id`，供前端查看/编辑/删除。
     pub fn list_memories(&self, card_name: &str, limit: usize) -> Result<Vec<MemoryHit>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, summary, keywords, source_round, created_at
@@ -740,6 +740,56 @@ impl MemoryStore {
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+
+    /// 修改某条记忆的内容（严格按 card_name 隔离），并同步更新 FTS5 索引。
+    /// 返回受影响的行数；不属于该角色的 id 不会被改动。
+    pub fn update_memory(&self, card_name: &str, id: i64, content: &str) -> Result<usize> {
+        if content.trim().is_empty() {
+            anyhow::bail!("memory content is empty");
+        }
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin memory update")?;
+        let changed = tx
+            .execute(
+                "UPDATE memories SET summary = ?1 WHERE card_name = ?2 AND id = ?3",
+                rusqlite::params![content.trim(), card_name, id],
+            )
+            .context("update memory summary")?;
+        if changed > 0 {
+            let body = seg(content.trim());
+            tx.execute(
+                "UPDATE memories_fts SET body = ?1 WHERE mem_id = ?2 AND card_name = ?3",
+                rusqlite::params![body, id, card_name],
+            )
+            .context("update memory fts")?;
+        }
+        tx.commit().context("commit memory update")?;
+        Ok(changed)
+    }
+
+    /// 删除某条记忆（严格按 card_name 隔离），并同步清理 FTS5 索引。
+    /// 返回受影响的行数；删除后由调用方 eprintln 记录日志。
+    pub fn delete_memory(&self, card_name: &str, id: i64) -> Result<usize> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .context("begin memory delete")?;
+        let changed = tx
+            .execute(
+                "DELETE FROM memories WHERE card_name = ?1 AND id = ?2",
+                rusqlite::params![card_name, id],
+            )
+            .context("delete memory")?;
+        tx.execute(
+            "DELETE FROM memories_fts WHERE mem_id = ?1 AND card_name = ?2",
+            rusqlite::params![id, card_name],
+        )
+        .context("delete memory fts")?;
+        tx.commit().context("commit memory delete")?;
+        Ok(changed)
     }
 
     // ---------- 角色状态机（蓝图 5.2）：手动更新，System 区注入 ----------
@@ -1651,6 +1701,62 @@ mod tests {
     }
 
     #[test]
+    fn list_memories_isolated_by_card() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        s.add_memory("苏菲", "苏菲喜欢糖葫芦", "零食", 1).unwrap();
+        s.add_memory("冬堡", "冬堡常年下雪", "天气", 1).unwrap();
+
+        let sophie = s.list_memories("苏菲", 10).unwrap();
+        assert_eq!(sophie.len(), 1);
+        assert_eq!(sophie[0].summary, "苏菲喜欢糖葫芦");
+
+        let dongbao = s.list_memories("冬堡", 10).unwrap();
+        assert_eq!(dongbao.len(), 1);
+        assert_eq!(dongbao[0].summary, "冬堡常年下雪");
+    }
+
+    #[test]
+    fn update_memory_changes_content_and_is_isolated_by_card() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        let id = s.add_memory("苏菲", "旧内容", "旧关键词", 1).unwrap();
+        s.add_memory("冬堡", "冬堡内容", "冬堡", 1).unwrap();
+
+        assert_eq!(
+            s.update_memory("苏菲", id, "新内容：苏菲爱吃山楂").unwrap(),
+            1
+        );
+        // 他角色同 id 不存在，不应被改动
+        assert_eq!(s.update_memory("冬堡", id, "不该生效").unwrap(), 0);
+
+        let hits = s.list_memories("苏菲", 10).unwrap();
+        assert_eq!(hits[0].summary, "新内容：苏菲爱吃山楂");
+        let untouched = s.list_memories("冬堡", 10).unwrap();
+        assert_eq!(untouched[0].summary, "冬堡内容");
+
+        // 召回使用新内容
+        let found = s.search("苏菲", "山楂", 5).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].summary, "新内容：苏菲爱吃山楂");
+    }
+
+    #[test]
+    fn delete_memory_removed_and_isolated_by_card() {
+        let s = MemoryStore::open_in_memory().unwrap();
+        let sophie_id = s.add_memory("苏菲", "苏菲记忆", "苏菲", 1).unwrap();
+        let dongbao_id = s.add_memory("冬堡", "冬堡记忆", "冬堡", 1).unwrap();
+
+        assert_eq!(s.delete_memory("苏菲", sophie_id).unwrap(), 1);
+        // 误删他角色同 id：不应生效
+        assert_eq!(s.delete_memory("冬堡", sophie_id).unwrap(), 0);
+
+        assert!(s.list_memories("苏菲", 10).unwrap().is_empty());
+        let remaining = s.list_memories("冬堡", 10).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, dongbao_id);
+        assert!(s.search("苏菲", "苏菲记忆", 5).unwrap().is_empty());
+    }
+
+    #[test]
     fn migration_adds_processed_to_legacy_db() {
         // 手工建一个"旧版"库（无 processed 列），再 open 应自动补列
         let mut p = std::env::temp_dir();
@@ -2004,8 +2110,14 @@ mod tests {
         s.set_working_memory("chat-1", "chat-1 的临时笔记").unwrap();
         s.set_working_memory("chat-2", "chat-2 的临时笔记").unwrap();
 
-        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("chat-1 的临时笔记".into()));
-        assert_eq!(s.get_working_memory("chat-2").unwrap(), Some("chat-2 的临时笔记".into()));
+        assert_eq!(
+            s.get_working_memory("chat-1").unwrap(),
+            Some("chat-1 的临时笔记".into())
+        );
+        assert_eq!(
+            s.get_working_memory("chat-2").unwrap(),
+            Some("chat-2 的临时笔记".into())
+        );
     }
 
     #[test]
@@ -2038,9 +2150,15 @@ mod tests {
         s.create_chat("chat-1", "card-a", "第一幕").unwrap();
 
         s.set_working_memory("chat-1", "第一版").unwrap();
-        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("第一版".into()));
+        assert_eq!(
+            s.get_working_memory("chat-1").unwrap(),
+            Some("第一版".into())
+        );
 
         s.set_working_memory("chat-1", "第二版").unwrap();
-        assert_eq!(s.get_working_memory("chat-1").unwrap(), Some("第二版".into()));
+        assert_eq!(
+            s.get_working_memory("chat-1").unwrap(),
+            Some("第二版".into())
+        );
     }
 }

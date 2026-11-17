@@ -143,6 +143,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/memories",
             post(routes::memory::add_memory).get(routes::memory::search_memories),
         )
+        .route(
+            "/api/memories/:id",
+            axum::routing::put(routes::memory::update_memory).delete(routes::memory::delete_memory),
+        )
         .route("/api/summarize", post(routes::memory::summarize))
         .route("/api/state", get(routes::get_state).put(routes::set_state))
         .layer(middleware::from_fn(cors))

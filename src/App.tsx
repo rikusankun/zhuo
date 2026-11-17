@@ -3,6 +3,7 @@ import { BookOpen, Bot, Brain, Check, Copy, Database, FileText, Menu, MessageCir
 import { api, isApiError, type Card, type Connection, type Lore, type Memory, type RegexScript } from './api/client';
 import { useConversation } from './hooks/useConversation';
 import { readPersona, readLore, saveLocal } from './lib/storage';
+import { MemoryManagement } from './components/MemoryManagement';
 
 const defaults:Connection={provider:'ollama',base_url:'http://127.0.0.1:11434',api_key:'',model:'qwen2.5-coder:3b',summary_model:'',num_gpu:15,temperature:.8,max_tokens:1024,top_p:1,frequency_penalty:0,presence_penalty:0,repetition_penalty:1};
 const initials=(name:string)=>name.trim().slice(0,2).toUpperCase()||'AI';
@@ -61,7 +62,7 @@ export default function App(){
     void Promise.all([api.memory.list(cardId),api.state.get(cardId)]).then(([m,s])=>{
       if(version!==memoryRequest.current)return;
       if(isApiError(m))throw new Error(m.error);if(isApiError(s))throw new Error(s.error);
-      setMemories(m.memories||[]);setMemoryTotal(m.total||0);setStateText(JSON.stringify(s.state||{},null,2));
+      setMemories(m.memories||[]);setMemoryTotal(Array.isArray(m.memories)?m.memories.length:0);setStateText(JSON.stringify(s.state||{},null,2));
     }).catch(e=>{if(version===memoryRequest.current)setError(String(e))});
   }
   useEffect(()=>{setWorkingMemory('');if(chatId)loadWorkingMemory();return()=>{if(workingMemoryTimer.current!==null)clearTimeout(workingMemoryTimer.current)}},[chatId]);
@@ -118,6 +119,7 @@ export default function App(){
         <input ref={presetInput} hidden type="file" accept=".json" onChange={e=>{importAsset('preset',e.target.files?.[0]);e.currentTarget.value=''}}/>
         <input ref={regexInput} hidden type="file" accept=".json" onChange={e=>{importAsset('regex',e.target.files?.[0]);e.currentTarget.value=''}}/>
         <div className="compat-grid"><button onClick={()=>worldInput.current?.click()}><BookOpen/>导入世界书<small>{compat.worldbook} 条</small></button><button onClick={()=>presetInput.current?.click()}><SlidersHorizontal/>导入预设</button><button onClick={()=>regexInput.current?.click()}><RefreshCw/>导入 Regex<small>{compat.regex} 条</small></button><button onClick={()=>exportCard('json')}><Database/>导出 V2 JSON</button><button onClick={()=>exportCard('png')}><Sparkles/>导出 V2 PNG</button></div>
+        <MemoryManagement cards={cards} cardId={cardId} />
       </div>}
       {panel==='context'&&<div className="panel-scroll form-stack"><Title icon={<UserRound/>}>当前 Persona</Title><Field label="名称" value={persona.name} set={v=>setPersona({...persona,name:v})}/><label>描述<textarea rows={5} value={persona.description} onChange={e=>setPersona({...persona,description:e.target.value})} placeholder="身份、外观、说话方式和背景…"/></label><div className="panel-section-title split"><span><BookOpen/>World Info</span><button onClick={()=>setLore(a=>[...a,{id:crypto.randomUUID(),keys:'',content:'',enabled:true}])}><Plus size={15}/>条目</button></div>{lore.map(x=><div className="lore-card" key={x.id}><div className="lore-top"><button className={`switch ${x.enabled?'on':''}`} onClick={()=>setLore(a=>a.map(v=>v.id===x.id?{...v,enabled:!v.enabled}:v))}><i/></button><span>{x.enabled?'已启用':'已停用'}</span><button className="danger-icon" onClick={()=>setLore(a=>a.filter(v=>v.id!==x.id))}><Trash2 size={14}/></button></div><input value={x.keys} onChange={e=>setLore(a=>a.map(v=>v.id===x.id?{...v,keys:e.target.value}:v))} placeholder="触发词，用逗号分隔"/><textarea rows={4} value={x.content} onChange={e=>setLore(a=>a.map(v=>v.id===x.id?{...v,content:e.target.value}:v))} placeholder="命中后注入的世界设定…"/></div>)}{!lore.length&&<Empty icon={<BookOpen/>} text="暂无 World Info 条目"/>}</div>}
       {panel==='memory'&&<div className="panel-scroll form-stack"><div className="metric-row"><div><span>长期记忆</span><strong>{memoryTotal}</strong></div><div><span>当前消息</span><strong>{messages.length}</strong></div></div><div className="panel-section-title split"><span><Brain/>记忆库</span><button onClick={loadMemory}><RefreshCw size={14}/>刷新</button></div><div className="memory-list">{memories.map(x=><div key={x.id}><p>{x.summary}</p><small>{x.source_round?`自动提取 #${x.source_round}`:'手动添加'} · {x.created_at}</small></div>)}{!memories.length&&<Empty icon={<Brain/>} text="还没有长期记忆"/>}</div><Title icon={<FileText/>}>工作记忆</Title><textarea className="code-editor" rows={8} placeholder="当前会话的临时笔记，切换会话不共享，不计入长期记忆" onChange={e=>{setWorkingMemory(e.target.value);if(workingMemoryTimer.current!==null)clearTimeout(workingMemoryTimer.current);workingMemoryTimer.current=setTimeout(()=>saveWorkingMemory(),500)}} onBlur={saveWorkingMemory} value={workingMemory}/><small className="settings-help">失焦或停止输入 500ms 后自动保存。切换会话时自动加载对应记忆。</small><Title icon={<Database/>}>角色状态 JSON</Title><textarea className="code-editor" rows={10} value={stateText} onChange={e=>setStateText(e.target.value)}/><button className="secondary wide" onClick={saveState}>保存角色状态</button></div>}

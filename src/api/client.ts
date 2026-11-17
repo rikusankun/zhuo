@@ -10,7 +10,13 @@ export type Chat = {
   updated_at: string;
 };
 export type Message = { role: 'user' | 'assistant' | 'system'; content: string };
-export type Memory = { id: number; summary: string; created_at: string; source_round: number };
+export type Memory = {
+  id: number;
+  summary: string;
+  keywords?: string;
+  source_round: number;
+  created_at: string;
+};
 export type Connection = {
   provider: string;
   base_url: string;
@@ -162,8 +168,23 @@ export const api = {
   },
   memory: {
     list: (card: string) =>
-      requestJson<{ memories?: Memory[]; total?: number }>(
-        `/api/memories?card=${encodeURIComponent(card)}`,
+      requestJson<{ memories?: Memory[] }>(
+        `/api/memories?card=${encodeURIComponent(card)}&limit=50`,
+      ),
+    update: (id: number, card: string, content: string) =>
+      requestJson<{ ok: boolean }>(
+        `/api/memories/${encodeURIComponent(String(id))}?card=${encodeURIComponent(card)}`,
+        jsonBody('PUT', { content }),
+      ),
+    remove: (id: number, card: string) =>
+      requestJson<{ ok: boolean }>(
+        `/api/memories/${encodeURIComponent(String(id))}?card=${encodeURIComponent(card)}`,
+        { method: 'DELETE' },
+      ),
+    add: (card: string, content: string, title?: string) =>
+      requestJson<{ ok: boolean; id: number }>(
+        '/api/memories',
+        jsonBody('POST', { card, content, title }),
       ),
   },
   state: {
