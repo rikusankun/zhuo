@@ -352,7 +352,7 @@ mod tests {
             .map(|i| Msg::user(format!("历史{i} {}", "旧".repeat(130))))
             .collect::<Vec<_>>();
         let messages = assemble_rag_messages(
-            &"系统".repeat(150),
+            &"系统".repeat(250),
             Some(&"检索".repeat(300)),
             Some(&"状态".repeat(300)),
             &history,
