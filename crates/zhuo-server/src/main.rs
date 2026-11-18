@@ -114,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/cards/:id", axum::routing::delete(routes::delete_card))
         .route("/api/cards/:id/export", get(routes::export_card))
         .route("/api/ollama/tags", get(routes::ollama_tags))
+        .route("/api/connection/models", post(routes::connection_models))
         .route("/api/compatibility", get(routes::compatibility))
         .route(
             "/api/compatibility/worldbook",

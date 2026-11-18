@@ -13,7 +13,7 @@ export default function App(){
   const [search,setSearch]=useState(''),[mobile,setMobile]=useState(false),[panel,setPanel]=useState<'context'|'settings'|'memory'|null>(null),[userMenuOpen,setUserMenuOpen]=useState(false),[createDialog,setCreateDialog]=useState(false);
   const [newRole,setNewRole]=useState({name:'',description:'',first_mes:'',system_prompt:''});
   const [connection,setConnection]=useState<Connection>(defaults),[saved,setSaved]=useState(false);
-  const [ollamaModels,setOllamaModels]=useState<string[]>([]),[modelsLoading,setModelsLoading]=useState(false),[modelsError,setModelsError]=useState('');
+  const [models,setModels]=useState<string[]>([]),[modelsLoading,setModelsLoading]=useState(false),[modelsError,setModelsError]=useState('');
   const [persona,setPersona]=useState(readPersona);
   const [lore,setLore]=useState<Lore[]>(readLore);
   const [compat,setCompat]=useState({worldbook:0,regex:0});
@@ -31,12 +31,12 @@ export default function App(){
   useEffect(()=>{log.current?.scrollTo({top:log.current.scrollHeight,behavior:'smooth'})},[messages]);
   useEffect(()=>saveLocal('zhuo.persona',persona),[persona]);
   useEffect(()=>saveLocal('zhuo.lore',lore),[lore]);
-  useEffect(()=>{if(panel==='settings'&&connection.provider==='ollama')void loadOllamaModels()},[panel,connection.provider]);
+  useEffect(()=>{if(panel==='settings')void loadModels()},[panel,connection.provider]);
   useEffect(()=>()=>{if(gpuSaveTimer.current!==null)window.clearTimeout(gpuSaveTimer.current)},[]);
   useEffect(()=>{if(!userMenuOpen)return;const closeMenu=(event:PointerEvent)=>{if(!(event.target instanceof Element)||!event.target.closest('.user-menu-anchor'))setUserMenuOpen(false)};const handleKey=(event:KeyboardEvent)=>{if(event.key==='Escape')setUserMenuOpen(false)};document.addEventListener('pointerdown',closeMenu);document.addEventListener('keydown',handleKey);return()=>{document.removeEventListener('pointerdown',closeMenu);document.removeEventListener('keydown',handleKey)}},[userMenuOpen]);
 
-  async function loadOllamaModels(){setModelsLoading(true);setModelsError('');try{const payload=await api.ollama.models();if(isApiError(payload))throw new Error(payload.error);setOllamaModels(Array.isArray(payload.models)?payload.models:[])}catch(e){setModelsError(`无法读取 Ollama 模型：${String(e)}`)}finally{setModelsLoading(false)}}
-  async function refreshOllamaModels(){if(await saveConnection(connection,false))await loadOllamaModels()}
+  async function loadModels(){setModelsLoading(true);setModelsError('');try{const payload=await api.connection.models({provider:connection.provider,base_url:connection.base_url,api_key:connection.api_key});if(isApiError(payload))throw new Error(payload.error||'未知错误');setModels(Array.isArray(payload.models)?payload.models:[])}catch(e){setModelsError(`无法读取模型列表：${String(e)}`)}finally{setModelsLoading(false)}}
+  async function refreshModels(){if(await saveConnection(connection,false))await loadModels()}
   async function createCard(){try{const result=await api.cards.create(newRole);if(isApiError(result))return setError(result.error);setCards(a=>[result.card,...a]);setCardId(result.card.id);setChats([]);setChatId('');setMessages([]);setCreateDialog(false);setNewRole({name:'',description:'',first_mes:'',system_prompt:''});setNotice(`已创建角色：${result.card.name}`)}catch(e){setError(`创建角色失败：${String(e)}`)}}
   async function deleteCard(item:Card){if(!confirm(`删除角色“${item.name}”？\n\n这会永久删除角色卡文件，以及该角色的全部对话、消息、长期记忆、世界设定索引和角色状态。此操作不可撤销。`))return;try{const result=await api.cards.delete(item.id);if(isApiError(result))return setError(result.error);const next=cards.filter(x=>x.id!==item.id);setCards(next);if(cardId===item.id){setCardId(next[0]?.id||'');setChats([]);setChatId('');setMessages([]);setPanel(null)}setNotice(`已删除角色：${item.name}`)}catch(e){setError(`删除角色失败：${String(e)}`)}}
   async function importCard(file?:File){try{if(!file)return;const data=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]||'');reader.onerror=()=>reject(reader.error);reader.readAsDataURL(file)});const x=await api.cards.import(file.name,data);if(isApiError(x))return setError(x.error);setCards(a=>a.some(v=>v.id===x.card.id)?a:[...a,x.card]);setCardId(x.card.id);setNotice(`已导入角色：${x.card.name}`)}catch(e){setError(String(e))}}
@@ -88,11 +88,11 @@ export default function App(){
         <label>服务类型<select value={connection.provider} onChange={e=>setConnection({...connection,provider:e.target.value})}><option value="ollama">Ollama</option><option value="openai">OpenAI Compatible</option></select></label>
         <Field label="Base URL" value={connection.base_url} set={v=>setConnection({...connection,base_url:v})}/>
         <Field label="API Key" value={connection.api_key} set={v=>setConnection({...connection,api_key:v})} password/>
-        <button className="primary wide" onClick={refreshOllamaModels} disabled={modelsLoading||connection.provider!=='ollama'}><RefreshCw size={16}/>{modelsLoading?'正在读取模型…':'刷新本地模型列表'}</button>
+        <button className="primary wide" onClick={refreshModels} disabled={modelsLoading}><RefreshCw size={16}/>{modelsLoading?'正在读取模型…':'刷新本地模型列表'}</button>
         {modelsError&&<div className="status error">{modelsError}</div>}
         {connection.provider==='openai'?<><Field label="主聊天模型" value={connection.model} set={v=>setConnection({...connection,model:v})}/><Field label="后台记忆提取模型（留空关闭）" value={connection.summary_model} set={v=>setConnection({...connection,summary_model:v})}/></>:<>
-        <label>主聊天模型<select value={connection.model} onChange={e=>void saveConnection({...connection,model:e.target.value},false)}>{!ollamaModels.includes(connection.model)&&<option value={connection.model}>{connection.model}</option>}{ollamaModels.map(model=><option key={model} value={model}>{model}</option>)}</select></label>
-        <label>后台记忆提取模型<select value={connection.summary_model} onChange={e=>void saveConnection({...connection,summary_model:e.target.value},false)}><option value="">关闭自动记忆提取</option>{!ollamaModels.includes(connection.summary_model)&&connection.summary_model&&<option value={connection.summary_model}>{connection.summary_model}</option>}{ollamaModels.map(model=><option key={model} value={model}>{model}</option>)}</select></label></>}
+        <label>主聊天模型<select value={connection.model} onChange={e=>void saveConnection({...connection,model:e.target.value},false)}>{!models.includes(connection.model)&&<option value={connection.model}>{connection.model}</option>}{models.map(model=><option key={model} value={model}>{model}</option>)}</select></label>
+        <label>后台记忆提取模型<select value={connection.summary_model} onChange={e=>void saveConnection({...connection,summary_model:e.target.value},false)}><option value="">关闭自动记忆提取</option>{!models.includes(connection.summary_model)&&connection.summary_model&&<option value={connection.summary_model}>{connection.summary_model}</option>}{models.map(model=><option key={model} value={model}>{model}</option>)}</select></label></>}
         <label>显存分配层数（num_gpu）<b>{connection.num_gpu}</b><input type="range" min="0" max="99" step="1" value={connection.num_gpu} onChange={e=>changeNumGpu(Number(e.target.value))}/></label>
         <small className="settings-help">6GB 显卡建议 15 层；12GB 以上可尝试 99 层。后台提取模型固定使用 CPU。</small>
         <Title icon={<SlidersHorizontal/>}>生成参数</Title>

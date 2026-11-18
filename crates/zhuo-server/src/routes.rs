@@ -167,6 +167,13 @@ fn default_num_gpu() -> i64 {
     15
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionModelsRequest {
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+}
+
 const DEFAULT_USER_NAME: &str = "旅人";
 
 fn ollama_root(base_url: &str) -> String {
@@ -230,6 +237,49 @@ async fn fetch_ollama_models(base_url: &str) -> Result<Vec<String>, String> {
     Ok(ollama_model_names(&payload))
 }
 
+async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let base = base_url.trim_end_matches('/');
+    let url = format!("{base}/models");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("create OpenAI client: {e}"))?;
+    let response = client
+        .get(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+        .map_err(|e| format!("OpenAI models request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = match response.text().await {
+            Ok(detail) => detail.chars().take(500).collect::<String>(),
+            Err(e) => format!("could not read error response: {e}"),
+        };
+        return Err(format!("OpenAI models returned HTTP {status}: {detail}"));
+    }
+    let payload: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("parse OpenAI models response: {e}"))?;
+    Ok(payload
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
+async fn fetch_models(provider: &str, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    match provider {
+        "ollama" => fetch_ollama_models(base_url).await,
+        _ => fetch_openai_models(base_url, api_key).await,
+    }
+}
+
 /// 连接设置的合并视图：以 .env 为基线（ServerState 已读入 ZHUO_API_BASE /
 /// ZHUO_API_KEY / ZHUO_MODEL），再用数据库里用户在设置面板保存的值覆盖。
 /// 优先级：.env 显式配置的 api_key 最高，避免「只读数据库」导致 .env 的 key
@@ -290,6 +340,15 @@ pub async fn ollama_tags(State(st): State<ServerState>) -> Json<serde_json::Valu
     match fetch_ollama_models(&connection_settings(&st).base_url).await {
         Ok(models) => Json(json!({"models": models})),
         Err(e) => Json(json!({"error": e})),
+    }
+}
+
+pub async fn connection_models(
+    Json(payload): Json<ConnectionModelsRequest>,
+) -> Json<serde_json::Value> {
+    match fetch_models(&payload.provider, &payload.base_url, &payload.api_key).await {
+        Ok(models) => Json(json!({"models": models})),
+        Err(e) => Json(json!({"models": [], "error": e})),
     }
 }
 

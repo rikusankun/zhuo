@@ -144,6 +144,8 @@ export const api = {
       requestJson<{ connection?: Connection }>('/api/connection'),
     save: (connection: Connection) =>
       requestJson<{ ok: boolean }>('/api/connection', jsonBody('PUT', connection)),
+    models: (payload: { provider: string; base_url: string; api_key: string }) =>
+      requestJson<{ models?: string[]; error?: string }>('/api/connection/models', jsonBody('POST', payload)),
   },
   chat: {
     stream: async (
