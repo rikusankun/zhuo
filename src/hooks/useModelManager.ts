@@ -1,6 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { api, isApiError, type Model } from '../api/client';
 import { useToast } from './useToast';
+import type { HookReturn } from './types';
 
 export type UseModelManagerInput = {
   provider: string;
@@ -8,12 +9,30 @@ export type UseModelManagerInput = {
   api_key: string;
 };
 
-export function useModelManager(input: UseModelManagerInput) {
+export type UseModelManagerData = {
+  models: Model[];
+  visibleModels: Model[];
+  connectionStatus: 'idle' | 'testing' | 'ok' | 'error';
+  modelFilter: string;
+};
+
+export type UseModelManagerActions = {
+  setModelFilter: (v: string) => void;
+  loadModels: () => Promise<void>;
+  testConnection: () => Promise<void>;
+  refreshModels: (saveFirst?: boolean) => Promise<void>;
+};
+
+export function useModelManager(input: UseModelManagerInput): HookReturn<UseModelManagerData, UseModelManagerActions> {
   const { addToast } = useToast();
   const [models, setModels] = useState<Model[]>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
+  const [loading, setLoading] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [modelFilter, setModelFilter] = useState('');
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
+
+  const versionRef = useRef(0);
 
   const visibleModels = models.filter(m => m.displayName.toLowerCase().includes(modelFilter.toLowerCase()));
 
@@ -22,40 +41,59 @@ export function useModelManager(input: UseModelManagerInput) {
   }, []);
 
   const loadModels = useCallback(async () => {
-    setModelsLoading(true);
+    const version = ++versionRef.current;
+    setLoading(true);
+    setConnectionStatus('testing');
+    setStatusError(null);
     try {
       const payload = await api.connection.models({
         provider: input.provider,
         base_url: normalizeBaseUrl(input.base_url),
         api_key: input.api_key,
       });
+      if (version !== versionRef.current) return;
       if (isApiError(payload)) throw new Error(payload.error || '未知错误');
       const ms = Array.isArray(payload.models) ? payload.models : [];
       setModels(ms.map(m => ({ id: m, displayName: m })));
       setConnectionStatus(ms.length ? 'ok' : 'idle');
+      setStatusSuccess(ms.length ? `发现 ${ms.length} 个模型` : '未发现模型');
     } catch (e) {
-      addToast('error', `无法读取模型列表：${String(e)}`);
+      if (version !== versionRef.current) return;
       setConnectionStatus('error');
+      const msg = `无法读取模型列表：${String(e)}`;
+      setStatusError(msg);
+      addToast('error', msg);
     } finally {
-      setModelsLoading(false);
+      if (version === versionRef.current) setLoading(false);
     }
   }, [input, normalizeBaseUrl, addToast]);
 
   const testConnection = useCallback(async () => {
+    const version = ++versionRef.current;
+    setLoading(true);
     setConnectionStatus('testing');
+    setStatusError(null);
+    setStatusSuccess(null);
     try {
       const payload = await api.connection.models({
         provider: input.provider,
         base_url: normalizeBaseUrl(input.base_url),
         api_key: input.api_key,
       });
+      if (version !== versionRef.current) return;
       if (isApiError(payload)) throw new Error(payload.error || '未知错误');
       const ms = Array.isArray(payload.models) ? payload.models : [];
       setConnectionStatus(ms.length ? 'ok' : 'idle');
+      setStatusSuccess(ms.length ? `连接正常，发现 ${ms.length} 个模型` : '连接正常，未发现模型');
       addToast('success', ms.length ? `连接正常，发现 ${ms.length} 个模型` : '连接正常，未发现模型');
     } catch (e) {
+      if (version !== versionRef.current) return;
       setConnectionStatus('error');
-      addToast('error', `连接测试失败：${String(e)}`);
+      const msg = `连接测试失败：${String(e)}`;
+      setStatusError(msg);
+      addToast('error', msg);
+    } finally {
+      if (version === versionRef.current) setLoading(false);
     }
   }, [input, normalizeBaseUrl, addToast]);
 
@@ -67,14 +105,12 @@ export function useModelManager(input: UseModelManagerInput) {
   }, [loadModels]);
 
   return {
-    models,
-    modelsLoading,
-    connectionStatus,
-    modelFilter,
-    setModelFilter,
-    visibleModels,
-    loadModels,
-    testConnection,
-    refreshModels,
+    data: { models, visibleModels, connectionStatus, modelFilter },
+    actions: { setModelFilter, loadModels, testConnection, refreshModels },
+    status: {
+      isLoading: loading,
+      error: statusError,
+      success: statusSuccess,
+    },
   };
 }

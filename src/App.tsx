@@ -27,8 +27,8 @@ export default function App() {
   const [createDialog, setCreateDialog] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
-  const { connection, setConnection, saved, normalizeBaseUrl, saveConnection, changeNumGpu } = useConnectionConfig();
-  const { modelsLoading, connectionStatus, modelFilter, setModelFilter, visibleModels, loadModels, testConnection, refreshModels } = useModelManager(connection);
+  const { data: { connection, saved }, actions: { setConnection, normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
+  const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, loadModels, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
 
   const { cards, setCards, cardId, setCardId, newRole, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } = useCharacter();
   const { persona, setPersona, lore, setLore, loreHits: contextLoreHits } = useContext();
