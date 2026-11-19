@@ -1,12 +1,30 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useState, type Dispatch, type SetStateAction } from 'react';
 import { api, isApiError, type Card } from '../api/client';
 import { useToast } from './useToast';
+import type { HookReturn } from './types';
 
-export function useCharacter() {
+export type UseCharacterData = {
+  cards: Card[];
+  cardId: string;
+  newRole: { name: string; description: string; first_mes: string; system_prompt: string };
+};
+
+export type UseCharacterActions = {
+  setCards: (cards: Card[]) => void;
+  setCardId: (id: string) => void;
+  setNewRole: Dispatch<SetStateAction<UseCharacterData['newRole']>>;
+  updateCardField: (field: keyof UseCharacterData['newRole'], value: string) => void;
+  resetNewRole: () => void;
+  createCard: () => Promise<void>;
+  deleteCard: (item: Card) => Promise<void>;
+  importCard: (file?: File) => Promise<void>;
+};
+
+export function useCharacter(): HookReturn<UseCharacterData, UseCharacterActions> {
   const { addToast } = useToast();
   const [cards, setCards] = useState<Card[]>([]);
-  const [cardId, setCardId] = useState('');
-  const [newRole, setNewRole] = useState({ name: '', description: '', first_mes: '', system_prompt: '' });
+  const [cardId, setCardId] = useState<string>('');
+  const [newRole, setNewRole] = useState<{ name: string; description: string; first_mes: string; system_prompt: string }>({ name: '', description: '', first_mes: '', system_prompt: '' });
 
   const createCard = useCallback(async () => {
     try {
@@ -57,15 +75,17 @@ export function useCharacter() {
     addToast('success', `已导入角色：${x.card.name}`);
   }, [addToast]);
 
+  const updateCardField = useCallback((field: keyof UseCharacterData['newRole'], value: string) => {
+    setNewRole(prev => ({ ...prev, [field]: value }));
+  }, []);
+
+  const resetNewRole = useCallback(() => {
+    setNewRole({ name: '', description: '', first_mes: '', system_prompt: '' });
+  }, []);
+
   return {
-    cards,
-    setCards,
-    cardId,
-    setCardId,
-    newRole,
-    setNewRole,
-    createCard,
-    deleteCard,
-    importCard,
+    data: { cards, cardId, newRole },
+    actions: { setCards, setCardId, setNewRole, updateCardField, resetNewRole, createCard, deleteCard, importCard },
+    status: { isLoading: false, error: null, success: null },
   };
 }

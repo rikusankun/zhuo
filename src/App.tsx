@@ -30,9 +30,9 @@ export default function App() {
   const { data: { connection, saved }, actions: { setConnection, normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
   const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, loadModels, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
 
-  const { cards, setCards, cardId, setCardId, newRole, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } = useCharacter();
-  const { persona, setPersona, lore, setLore, loreHits: contextLoreHits } = useContext();
-  const { memories, memoryTotal, stateText, setStateText, loadMemory, saveState } = useMemory(cardId);
+  const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
+  const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setPersona, setLore } } = useContext();
+  const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
   const { compat, importAsset, exportCard } = useAssetManager({ connection, cardId });
 
   const { chats, chatId, setChatId, messages, input, setInput, busy, loading, usage, promptChars, promptTokens, abort, newChat, deleteChat, renameChat, send, regenerate } = useConversation(cardId, { persona, lore_entries: lore }, []);

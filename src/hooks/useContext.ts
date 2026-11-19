@@ -1,8 +1,20 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Lore } from '../api/client';
 import { readPersona, readLore, saveLocal } from '../lib/storage';
+import type { HookReturn } from './types';
 
-export function useContext() {
+export type UseContextData = {
+  persona: { name: string; description: string };
+  lore: Lore[];
+  loreHits: (text: string) => Lore[];
+};
+
+export type UseContextActions = {
+  setPersona: (next: { name: string; description: string }) => void;
+  setLore: (next: Lore[] | ((prev: Lore[]) => Lore[])) => void;
+};
+
+export function useContext(): HookReturn<UseContextData, UseContextActions> {
   const [persona, setPersona] = useState<{ name: string; description: string }>(readPersona);
   const [lore, setLore] = useState<Lore[]>(readLore);
 
@@ -20,10 +32,8 @@ export function useContext() {
   }, [lore]);
 
   return {
-    persona,
-    setPersona,
-    lore,
-    setLore,
-    loreHits,
+    data: { persona, lore, loreHits },
+    actions: { setPersona, setLore },
+    status: { isLoading: false, error: null, success: null },
   };
 }
