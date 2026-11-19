@@ -43,7 +43,11 @@ pub async fn set_connection(
     if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
         return Json(json!({"error":"Base URL 和模型不能为空"}));
     }
-    if !matches!(cfg.provider.as_str(), "ollama" | "openai" | "openai_compatible") {
+    const ALLOWED_PROVIDERS: &[&str] = &[
+        "ollama", "openai", "openai_compatible", "anthropic", "google",
+        "openrouter", "azure", "deepseek", "moonshot", "baidu", "aliyun", "tencent", "custom"
+    ];
+    if !ALLOWED_PROVIDERS.contains(&cfg.provider.as_str()) {
         return Json(json!({"error":"不支持的服务类型"}));
     }
     cfg.base_url = cfg.base_url.trim().trim_end_matches('/').to_string();

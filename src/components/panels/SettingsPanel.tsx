@@ -20,6 +20,20 @@ export type SettingsPanelProps = {
   compat: { worldbook: number; regex: number };
 };
 
+const PROVIDERS: { id: string; name: string; baseUrl: string | null; defaultModel: string }[] = [
+  { id: 'ollama', name: 'Ollama（本地）', baseUrl: null, defaultModel: '' },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o' },
+  { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022' },
+  { id: 'google', name: 'Google', baseUrl: 'https://generativelanguage.googleapis.com/v1', defaultModel: 'gemini-1.5-pro' },
+  { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: '' },
+  { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat' },
+  { id: 'moonshot', name: 'Moonshot', baseUrl: 'https://api.moonshot.cn/v1', defaultModel: 'moonshot-v1' },
+  { id: 'aliyun', name: '阿里云', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-turbo' },
+  { id: 'baidu', name: '百度文心', baseUrl: 'https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop/chat', defaultModel: '' },
+  { id: 'tencent', name: '腾讯云', baseUrl: 'https://api.lkeapi.tencentcloudapi.com/v1', defaultModel: '' },
+  { id: 'custom', name: '自定义地址', baseUrl: null, defaultModel: '' },
+];
+
 function Field({ label, value, set, password = false, onBlur }: { label: string; value: string; set: (v: string) => void; password?: boolean; onBlur?: (v: string) => void }) {
   const [visible, setVisible] = React.useState(false);
   return (
@@ -68,10 +82,15 @@ export function SettingsPanel({
       <div style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '8px' }}>连接与生成</div>
       <label>
         服务类型
-        <select value={connection.provider} onChange={e => setConnection({ ...connection, provider: e.target.value })}>
+        <select value={connection.provider} onChange={e => {
+          const pid = e.target.value;
+          const p = PROVIDERS.find(x => x.id === pid);
+          setConnection({ ...connection, provider: pid, base_url: p?.baseUrl ?? '' });
+        }}>
           <option value="">请选择服务类型</option>
-          <option value="ollama">Ollama</option>
-          <option value="openai">OpenAI Compatible</option>
+          {PROVIDERS.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
         </select>
       </label>
       <Field label="Base URL" value={connection.base_url ?? ''} set={v => setConnection({ ...connection, base_url: v })} onBlur={v => setConnection({ ...connection, base_url: normalizeBaseUrl(v) })} />
