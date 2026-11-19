@@ -43,6 +43,7 @@ export function useConnectionConfig(): HookReturn<UseConnectionConfigData, UseCo
 
   const gpuSaveTimer = useRef<number | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const autoSaveTimer = useRef<number | null>(null);
 
   const normalizeBaseUrl = useCallback((url: string) => {
     return url && !/^https?:\/\//i.test(url) ? `http://${url}` : url;
@@ -104,12 +105,27 @@ export function useConnectionConfig(): HookReturn<UseConnectionConfigData, UseCo
       if (gpuSaveTimer.current !== null) {
         window.clearTimeout(gpuSaveTimer.current);
       }
+      if (autoSaveTimer.current !== null) {
+        window.clearTimeout(autoSaveTimer.current);
+      }
     };
   }, []);
 
+  // 外部主动修改连接字段后，防抖自动写入数据库，无需手动点保存
+  const handleSetConnection = useCallback((c: Connection) => {
+    setConnection(c);
+    if (autoSaveTimer.current !== null) {
+      window.clearTimeout(autoSaveTimer.current);
+    }
+    autoSaveTimer.current = window.setTimeout(() => {
+      autoSaveTimer.current = null;
+      void saveConnection(c, false);
+    }, 800);
+  }, [saveConnection]);
+
   return {
     data: { connection, saved },
-    actions: { setConnection, saveConnection, changeNumGpu, normalizeBaseUrl },
+    actions: { setConnection: handleSetConnection, saveConnection, changeNumGpu, normalizeBaseUrl },
     status: {
       isLoading: saving,
       error: saveError,
