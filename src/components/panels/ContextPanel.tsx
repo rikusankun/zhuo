@@ -1,15 +1,15 @@
 import React from 'react';
 import { BookOpen, Plus, Trash2 } from 'lucide-react';
 import type { Lore } from '../../api/client';
+import { usePersona } from '../../hooks/useConnectionContext';
 
 export type ContextPanelProps = {
-  persona: { name: string; description: string };
-  setPersona: (p: { name: string; description: string }) => void;
   lore: Lore[];
   setLore: React.Dispatch<React.SetStateAction<Lore[]>>;
 };
 
-export function ContextPanel({ persona, setPersona, lore, setLore }: ContextPanelProps) {
+export function ContextPanel({ lore, setLore }: ContextPanelProps) {
+  const { persona, setPersona } = usePersona();
   return (
     <div className="panel-scroll form-stack">
       <div style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '8px' }}>当前 Persona</div>

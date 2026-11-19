@@ -1,6 +1,7 @@
 import React from 'react';
 import { Brain, MoreHorizontal, Plus, Search, Settings, Trash2, Upload, UserRound, X, Sparkles, MessageCircle } from 'lucide-react';
 import type { Card, Chat } from '../api/client';
+import { usePersona } from '../hooks/useConnectionContext';
 
 export type SidebarProps = {
   cards: Card[];
@@ -21,7 +22,6 @@ export type SidebarProps = {
   setChatId: (id: string) => void;
   deleteChat: (id: string) => void;
   renameChat: () => void;
-  persona: { name: string; description: string };
   setUserMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
   userMenuOpen: boolean;
   setPanel: (panel: 'context' | 'settings' | 'memory' | null) => void;
@@ -48,11 +48,11 @@ export function Sidebar({
   setChatId,
   deleteChat,
   renameChat,
-  persona,
   setUserMenuOpen,
   userMenuOpen,
   setPanel,
 }: SidebarProps) {
+  const { persona } = usePersona();
   const filtered = cards.filter(x => `${x.name} ${x.description}`.toLowerCase().includes(search.toLowerCase()));
 
   return (

@@ -1,11 +1,11 @@
 import React from 'react';
 import { Bot, Copy, Plus, RefreshCw, Send, Square } from 'lucide-react';
 import type { Card, Lore, Message } from '../api/client';
+import { usePersona } from '../hooks/useConnectionContext';
 
 export type ChatViewProps = {
   messages: Message[];
   card: Card | undefined;
-  persona: { name: string; description: string };
   busy: boolean;
   loading: boolean;
   cardId: string;
@@ -16,13 +16,13 @@ export type ChatViewProps = {
 export function ChatView({
   messages,
   card,
-  persona,
   busy,
   loading,
   cardId,
   newChat,
   regenerate,
 }: ChatViewProps) {
+  const { persona } = usePersona();
   const log = React.useRef<HTMLDivElement>(null);
   const initials = (name: string) => name.trim().slice(0, 2).toUpperCase() || 'AI';
 
@@ -87,7 +87,6 @@ export function ChatComposer({
   promptTokens,
   usage,
   loreHits,
-  persona,
 }: {
   input: string;
   setInput: (v: string) => void;
@@ -101,8 +100,8 @@ export function ChatComposer({
   promptTokens: number | null;
   usage: number | null;
   loreHits: (text: string) => Lore[];
-  persona: { name: string; description: string };
 }) {
+  const { persona } = usePersona();
   return (
     <div className="composer-wrap">
       {(promptChars !== null || usage) && (
