@@ -108,7 +108,7 @@ export function SettingsPanel({
       )}
       <label>
         显存分配层数（num_gpu）
-        <b>{connection.num_gpu === null ? '自动' : String(connection.num_gpu)}</b>
+        <b>{connection.num_gpu === null ? '自动（推荐）' : String(connection.num_gpu)}</b>
         <input type="range" min="0" max="99" step="1" value={connection.num_gpu ?? 0} onChange={e => changeNumGpu(Number(e.target.value))} disabled={connection.num_gpu === null} />
         <button type="button" onClick={() => changeNumGpu(null)} disabled={connection.num_gpu !== null} style={{ marginLeft: '6px', fontSize: '11px' }}>自动</button>
       </label>
