@@ -196,9 +196,87 @@ crates/zhuo-server/src/services/ 领域 service（含记忆提取）
 crates/zhuo-llm/              模型服务请求与流式响应
 crates/zhuo-memory/           SQLite 会话、记忆与设置存储
 crates/zhuo-card/             角色卡解析与导入导出
-crates/zhuo-session/          会话辅助逻辑
 examples/                    示例角色卡和世界设定
 ```
+
+## 前端架构
+
+前端使用 React + Vite + Tailwind CSS，采用统一的 Hook 接口标准：
+
+### 统一 Hook 返回结构
+
+所有业务 Hook 统一返回 `HookReturn<TData, TActions>`：
+
+```ts
+interface HookStatus {
+  isLoading: boolean;
+  error: string | null;
+  success: string | null;
+}
+
+interface HookReturn<TData, TActions> {
+  data: TData;
+  actions: TActions;
+  status: HookStatus;
+}
+```
+
+- `data`：只读数据集合
+- `actions`：可调用的动作集合
+- `status`：统一的加载/错误/成功状态，UI 层可直接监听并渲染 Toast
+
+### 已重构的 Hook
+
+| Hook | 职责 |
+|------|------|
+| `useConnectionConfig` | 连接设置、模型列表刷新、GPU 层数 |
+| `useModelManager` | 模型加载、连接测试、版本锁竞争控制 |
+| `useCharacter` | 角色卡增删改查、导入、新建角色表单 |
+| `useContext` | Persona、Lore 世界设定、关键词命中检索 |
+| `useMemory` | 长期记忆、角色状态保存与加载 |
+| `useConversation` | 会话、消息流式发送/重生成、abort 控制 |
+| `useAssetManager` | 世界书/预设/Regex 导入导出、卡片导出 |
+
+`useToast` 和 `useConnectionContext` 为 Context Provider 模式，不适用 HookReturn。
+
+### 目录 barrel 文件
+
+- `src/hooks/index.ts`：所有 Hook 的统一导出入口
+- `src/components/panels/index.ts`：SettingsPanel、ContextPanel、MemoryPanel 统一导出
+
+### App.tsx 精简
+
+根组件 `App.tsx` 已压缩至 **58 行**（目标 ≤ 80 行），仅保留状态聚合、数据流编排和布局渲染；具体业务逻辑全部下沉至各 Hook，UI 呈现下沉至 `components/` 与 `components/panels/`。
+
+## UI/UX 设计
+
+### SAO 赛博风格
+
+- 背景：`bg-[#0a101f]/80 backdrop-blur-md`
+- 边框：`border-cyan-500/20`
+- 输入框：`bg-black/40 border-b border-cyan-500/50 focus:border-cyan-400`
+- 按钮：悬停发光 `hover:shadow-[0_0_15px_rgba(34,211,238,0.4)]`
+- 字体：`tracking-wider` / `tracking-widest`
+- 主题：`:root` / `.dark` CSS 变量（`--bg`、`--panel`、`--text`、`--accent` 等），定义在 `src/index.css`
+
+### 三栏布局
+
+- 左侧边栏（`w-72 hidden lg:flex`）：角色卡列表、搜索、新建对话、导入
+- 中间主区（`flex-1`）：`ChatView` 消息列表 + 空状态 + 自动滚到底部
+- 右侧面板（`w-[340px]`）：SettingsPanel（连接与生成）、ContextPanel（上下文工作台）、MemoryPanel（记忆与状态）
+
+### 核心组件
+
+| 组件 | 文件 | 职责 |
+|------|------|------|
+| `Header` | `src/components/Header.tsx` | 顶部导航、活跃角色显示、菜单按钮 |
+| `ChatView` | `src/components/ChatView.tsx` | 消息列表、空状态、滚动到底部 |
+| `ChatComposer` | `src/components/ChatView.tsx` | 输入框、发送/中止、提示词字数提示 |
+| `SettingsPanel` | `src/components/panels/SettingsPanel.tsx` | 连接设置、模型列表、连接测试 |
+| `ContextPanel` | `src/components/panels/ContextPanel.tsx` | Persona 与 Lore 世界设定编辑 |
+| `MemoryPanel` | `src/components/panels/MemoryPanel.tsx` | 长期记忆、角色状态 JSON 编辑 |
+
+所有面板通过 Props 与 `App.tsx` 通信，业务状态由 Hook 统一管理。
 
 ## 常见问题
 
