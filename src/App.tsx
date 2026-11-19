@@ -33,7 +33,7 @@ export default function App() {
   const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
   const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setPersona, setLore } } = useContext();
   const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
-  const { compat, importAsset, exportCard } = useAssetManager({ connection, cardId });
+  const { data: { compat }, actions: { importAsset, exportCard } } = useAssetManager({ connection, cardId });
 
   const { data: { chats, chatId, messages, input, busy, loading, usage, promptChars, promptTokens, abort }, actions: { setChatId, setInput, newChat, deleteChat, renameChat, send, regenerate } } = useConversation(cardId, { persona, lore_entries: lore }, []);
 
