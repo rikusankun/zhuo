@@ -7,8 +7,7 @@
     "build": "vite build",
     "typecheck": "tsc --noEmit",
     "backend": "node scripts/run-backend.mjs",
-    "ollama": "node scripts/ensure-ollama.mjs",
-    "start": "concurrently -k -n ollama,backend,web -c yellow,cyan,green \"npm run ollama\" \"npm run backend\" \"vite\""
+    "start": "concurrently -k -n backend,web -c cyan,green \"npm run backend\" \"vite\""
   },
   "dependencies": {
     "dotenv": "^16.4.7",
