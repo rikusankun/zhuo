@@ -48,6 +48,7 @@ export type ChatInput = {
   regenerate?: boolean;
   persona: { name: string; description: string };
   lore_entries: Lore[];
+  model?: string;
 };
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<ApiResult<T>> {

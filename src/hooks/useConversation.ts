@@ -201,7 +201,7 @@ export function useConversation(
   }, []);
 
   // 发送消息 / 流式生成
-  const send = useCallback(async (override?: string, regenerate = false) => {
+  const send = useCallback(async (override?: string, regenerate = false, model?: string) => {
     const text = (override ?? input).trim();
     if (!text || !cardId || locked.current || loading) return;
     
@@ -257,6 +257,7 @@ export function useConversation(
         message: text, 
         display_message: text, 
         regenerate, 
+        model,
         ...contextRef.current 
       }, controller.signal);
       

@@ -161,7 +161,7 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
     let native = uses_native_ollama(&connection, st.ollama_native);
     let base = api_base_url(&connection, native);
     let key = connection.api_key;
-    let model = connection.model;
+    let model = req.model.as_deref().unwrap_or(&connection.model).to_string();
     let st2 = st.clone();
     let input = if req.display_message.trim().is_empty() {
         req.message.clone()

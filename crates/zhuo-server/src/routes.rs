@@ -46,6 +46,8 @@ pub struct ChatRequest {
     pub world_info: Vec<String>,
     #[serde(default)]
     pub lore_entries: Vec<ChatLoreEntry>,
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
