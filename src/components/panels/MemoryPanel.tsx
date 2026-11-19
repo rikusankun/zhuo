@@ -8,7 +8,7 @@ export type MemoryPanelProps = {
   messagesLength: number;
   loadMemory: () => void;
   stateText: string;
-  setStateText: (s: string) => void;
+  setStateText: React.Dispatch<React.SetStateAction<string>>;
   saveState: () => void;
 };
 

@@ -20,9 +20,6 @@ export type SettingsPanelProps = {
   importAsset: (kind: 'worldbook' | 'preset' | 'regex', file?: File) => Promise<void>;
   exportCard: (format: 'json' | 'png') => Promise<void>;
   compat: { worldbook: number; regex: number };
-  worldInput: React.RefObject<HTMLInputElement>;
-  presetInput: React.RefObject<HTMLInputElement>;
-  regexInput: React.RefObject<HTMLInputElement>;
 };
 
 function Field({ label, value, set, password = false, onBlur }: { label: string; value: string; set: (v: string) => void; password?: boolean; onBlur?: (v: string) => void }) {
@@ -66,10 +63,10 @@ export function SettingsPanel({
   importAsset,
   exportCard,
   compat,
-  worldInput,
-  presetInput,
-  regexInput,
 }: SettingsPanelProps) {
+  const worldInput = React.useRef<HTMLInputElement>(null);
+  const presetInput = React.useRef<HTMLInputElement>(null);
+  const regexInput = React.useRef<HTMLInputElement>(null);
   return (
     <div className="panel-scroll form-stack">
       <div style={{ fontWeight: 'bold', fontSize: '14px', marginBottom: '8px' }}>连接与生成</div>

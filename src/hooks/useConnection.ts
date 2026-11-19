@@ -35,10 +35,6 @@ export function useConnection() {
   const gpuSaveTimer = useRef<number | null>(null);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
 
-  const worldInput = useRef<HTMLInputElement>(null);
-  const presetInput = useRef<HTMLInputElement>(null);
-  const regexInput = useRef<HTMLInputElement>(null);
-
   const visibleModels = models.filter(m => m.displayName.toLowerCase().includes(modelFilter.toLowerCase()));
 
   const normalizeBaseUrl = useCallback((url: string) => {
@@ -199,9 +195,6 @@ export function useConnection() {
     setCompat,
     regexScripts,
     setRegexScripts,
-    worldInput,
-    presetInput,
-    regexInput,
     error,
     setError,
     notice,
