@@ -191,10 +191,20 @@ src/                         React 前端
 src/api/                     前端 HTTP API 客户端
 scripts/                     本地开发启动脚本
 crates/zhuo-server/          Axum HTTP 服务和 API 路由
-crates/zhuo-server/src/routes/ 按领域组织的 HTTP handlers
+crates/zhuo-server/src/routes/ 按领域组织的 HTTP handlers（connection/cards/chat/history/state/compatibility）
 crates/zhuo-server/src/services/ 领域 service（含记忆提取）
+crates/zhuo-server/src/system_prompt.rs 系统提示词生成
+crates/zhuo-server/src/lore_injector.rs 世界书注入、检索块与状态渲染
+crates/zhuo-server/src/history_formatter.rs RAG 消息组装与长度预算控制
 crates/zhuo-llm/              模型服务请求与流式响应
 crates/zhuo-memory/           SQLite 会话、记忆与设置存储
+crates/zhuo-memory/src/lib.rs 18 行，仅保留 mod + pub use
+crates/zhuo-memory/src/config.rs 数据库常量、建表 SQL、迁移语句、停用词表
+crates/zhuo-memory/src/types.rs MemoryHit / PromptHit / LoreEntry / ChatRecord
+crates/zhuo-memory/src/jieba.rs jieba 中文分词、去噪、FTS5 MATCH 语法
+crates/zhuo-memory/src/lore_engine.rs SillyTavern 兼容世界书触发逻辑
+crates/zhuo-memory/src/repositories/ 按表拆分的仓储层（message/chat/memory/lore/state/settings）
+crates/zhuo-memory/src/store.rs 纯连接池 + 事务协调器，委派给 repositories，< 330 行（含 25 测试）
 crates/zhuo-card/             角色卡解析与导入导出
 examples/                    示例角色卡和世界设定
 ```
@@ -271,12 +281,38 @@ interface HookReturn<TData, TActions> {
 |------|------|------|
 | `Header` | `src/components/Header.tsx` | 顶部导航、活跃角色显示、菜单按钮 |
 | `ChatView` | `src/components/ChatView.tsx` | 消息列表、空状态、滚动到底部 |
-| `ChatComposer` | `src/components/ChatView.tsx` | 输入框、发送/中止、提示词字数提示 |
+| `ChatComposer` | `src/components/ChatComposer.tsx` | 输入框、发送/中止、提示词字数提示 |
+| `Sidebar` | `src/components/Sidebar.tsx` | 左侧边栏容器，组合子组件 |
+| `CharacterList` | `src/components/CharacterList.tsx` | 角色卡搜索、列表、导入、删除 |
+| `ChatList` | `src/components/ChatList.tsx` | 对话会话列表、新建、重命名、删除 |
+| `UserMenu` | `src/components/UserMenu.tsx` | 用户头像、设置、上下文、记忆面板入口 |
 | `SettingsPanel` | `src/components/panels/SettingsPanel.tsx` | 连接设置、模型列表、连接测试 |
 | `ContextPanel` | `src/components/panels/ContextPanel.tsx` | Persona 与 Lore 世界设定编辑 |
 | `MemoryPanel` | `src/components/panels/MemoryPanel.tsx` | 长期记忆、角色状态 JSON 编辑 |
 
 所有面板通过 Props 与 `App.tsx` 通信，业务状态由 Hook 统一管理。
+
+## 后端架构
+
+后端使用 Rust + Axum + SQLite，按领域拆分：
+
+| 模块 | 文件 | 职责 |
+|------|------|------|
+| `config` | `crates/zhuo-server/src/config.rs` | `ConnectionSettings`、`ChatLoreEntry`、`RegexScript`、配置读写 |
+| `routes` | `crates/zhuo-server/src/routes.rs` | 路由声明、SSE 流类型、Ollama/OpenAI 模型列表获取 |
+| `routes/connection` | `crates/zhuo-server/src/routes/connection.rs` | 连接 GET/SET、Ollama tags、模型列表代理 |
+| `routes/cards` | `crates/zhuo-server/src/routes/cards.rs` | 角色卡 CRUD、世界书/预设/Regex 导入导出 |
+| `routes/chat` | `crates/zhuo-server/src/routes/chat.rs` | SSE 流式对话、会话创建/重命名/删除 |
+| `routes/history` | `crates/zhuo-server/src/routes/history.rs` | 历史记录读取、重置、清空 |
+| `routes/state` | `crates/zhuo-server/src/routes/state.rs` | 角色状态 GET/PUT |
+| `routes/compatibility` | `crates/zhuo-server/src/routes/compatibility.rs` | 世界书与 Regex 兼容性查询 |
+| `services` | `crates/zhuo-server/src/services/` | 记忆提取、世界书业务逻辑 |
+| `prompt` | `crates/zhuo-server/src/prompt.rs` | 提示词组装、检索、状态、历史（模块重出口） |
+| `system_prompt` | `crates/zhuo-server/src/system_prompt.rs` | 系统提示词生成、写作规则 |
+| `lore_injector` | `crates/zhuo-server/src/lore_injector.rs` | 世界书注入、检索块、角色状态渲染 |
+| `history_formatter` | `crates/zhuo-server/src/history_formatter.rs` | RAG 消息组装、长度预算控制 |
+| `state` | `crates/zhuo-server/src/state.rs` | `ServerState`、GPU 层默认值、原生通道默认值 |
+| `zhuo-memory` | `crates/zhuo-memory/` | SQLite + FTS5 + jieba，纯本地零显存记忆系统 |
 
 ## 常见问题
 
