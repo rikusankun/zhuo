@@ -3,9 +3,6 @@
 pub use crate::history_formatter::{
     assemble_rag_messages, estimate_prompt_tokens, prompt_chars,
 };
+pub use crate::history_formatter::MAX_PROMPT_CHARS;
 pub use crate::lore_injector::{retrieval_block, render_state, world_text};
 pub use crate::system_prompt::{minimal_system_prompt, system_prompt};
-
-pub use crate::history_formatter::{MAX_HISTORY_MESSAGES, MAX_PROMPT_CHARS};
-pub use crate::lore_injector::MAX_RETRIEVAL_CHARS;
-pub use crate::system_prompt::MAX_SYSTEM_CHARS;
