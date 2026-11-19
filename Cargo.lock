@@ -2134,16 +2134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zhuo-session"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
- "zhuo-llm",
-]
-
-[[package]]
 name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

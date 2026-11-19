@@ -3,7 +3,8 @@ import { BookOpen, Brain, Menu, X } from 'lucide-react';
 import { api, isApiError, type Card } from './api/client';
 import { useConversation, useConnectionConfig, useModelManager, useAssetManager, useCharacter, useContext, useMemory, ToastProvider, useToast, PersonaProvider, ConnectionProvider } from './hooks';
 import { Sidebar } from './components/Sidebar';
-import { ChatView, ChatComposer } from './components/ChatView';
+import { ChatView } from './components/ChatView';
+import { ChatComposer } from './components/ChatComposer';
 import { SettingsPanel, ContextPanel, MemoryPanel } from './components/panels';
 
 const initials = (name: string) => name.trim().slice(0, 2).toUpperCase() || 'AI';

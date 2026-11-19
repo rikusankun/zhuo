@@ -152,9 +152,9 @@ pub fn extract_summary(raw: &str) -> Option<String> {
 /// 执行一次提取。返回 Ok(Some(summary)) 表示成功写入；
 /// Ok(None) 表示本轮跳过（消息不足 / 模型输出不可解析）；Err 只在最底层 IO 故障时出现。
 pub async fn run_extraction(st: &ServerState, card: &str) -> Result<Option<String>> {
-    let connection = crate::routes::connection_settings(st);
-    let native = crate::routes::uses_native_ollama(&connection, st.ollama_native);
-    let base_url = crate::routes::api_base_url(&connection, native);
+    let connection = crate::config::connection_settings(st);
+    let native = crate::config::uses_native_ollama(&connection, st.ollama_native);
+    let base_url = crate::config::api_base_url(&connection, native);
     if connection.summary_model.trim().is_empty() {
         return Ok(None);
     }

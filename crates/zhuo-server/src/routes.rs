@@ -7,18 +7,23 @@ use axum::response::sse::{Event, Sse};
 use axum::Json;
 use base64::Engine;
 use futures_util::stream::Stream;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 use zhuo_llm::{StreamConfig, StreamOutcome};
 
+use crate::config::{
+    api_base_url, api_key_source, connection_settings, ollama_root, uses_native_ollama,
+    ConnectionSettings, ChatLoreEntry, RegexScript,
+};
 use crate::prompt::{
     assemble_rag_messages, estimate_prompt_tokens, minimal_system_prompt, prompt_chars,
-    render_state, retrieval_block, system_prompt, MAX_PROMPT_CHARS,
+    retrieval_block, render_state, system_prompt, MAX_PROMPT_CHARS,
 };
-use crate::services::memory_service;
+use crate::services::{lore, memory_service};
+use crate::services::lore::card_lore_entries;
 use crate::state::ServerState;
 
 /// 统一 SSE 流类型：盒装动态流，保证所有返回路径是同一个具体类型。
@@ -48,38 +53,6 @@ pub struct ChatPersona {
     pub name: String,
     #[serde(default)]
     pub description: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ChatLoreEntry {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub keys: String,
-    #[serde(default)]
-    pub content: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RegexScript {
-    #[serde(default, alias = "scriptName")]
-    pub script_name: String,
-    #[serde(default, alias = "findRegex")]
-    pub find_regex: String,
-    #[serde(default, alias = "replaceString")]
-    pub replace_string: String,
-    #[serde(default)]
-    pub placement: Vec<i64>,
-    #[serde(default)]
-    pub disabled: bool,
-    #[serde(default, alias = "promptOnly")]
-    pub prompt_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -120,84 +93,7 @@ fn default_export_format() -> String {
     "json".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct ConnectionSettings {
-    #[serde(default = "default_provider")]
-    pub provider: String,
-    #[serde(default)]
-    pub base_url: String,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub summary_model: String,
-    #[serde(default = "default_num_gpu")]
-    pub num_gpu: i64,
-    #[serde(default = "default_temperature")]
-    pub temperature: f32,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    #[serde(default = "default_top_p")]
-    pub top_p: f32,
-    #[serde(default)]
-    pub frequency_penalty: f32,
-    #[serde(default)]
-    pub presence_penalty: f32,
-    #[serde(default = "default_repetition_penalty")]
-    pub repetition_penalty: f32,
-}
-
-fn default_provider() -> String {
-    "ollama".into()
-}
-fn default_temperature() -> f32 {
-    0.8
-}
-fn default_max_tokens() -> u32 {
-    1024
-}
-fn default_top_p() -> f32 {
-    1.0
-}
-fn default_repetition_penalty() -> f32 {
-    1.0
-}
-fn default_num_gpu() -> i64 {
-    15
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConnectionModelsRequest {
-    pub provider: String,
-    pub base_url: String,
-    pub api_key: String,
-}
-
 const DEFAULT_USER_NAME: &str = "旅人";
-
-fn ollama_root(base_url: &str) -> String {
-    base_url
-        .trim()
-        .trim_end_matches('/')
-        .strip_suffix("/v1")
-        .unwrap_or(base_url.trim().trim_end_matches('/'))
-        .trim_end_matches('/')
-        .to_string()
-}
-
-pub(crate) fn api_base_url(connection: &ConnectionSettings, ollama_native: bool) -> String {
-    let base = connection.base_url.trim_end_matches('/');
-    if !ollama_native && connection.provider == "ollama" && !base.ends_with("/v1") {
-        format!("{base}/v1")
-    } else {
-        base.to_string()
-    }
-}
-
-pub(crate) fn uses_native_ollama(connection: &ConnectionSettings, enabled: bool) -> bool {
-    enabled && connection.provider == "ollama"
-}
 
 fn ollama_model_names(payload: &Value) -> Vec<String> {
     payload
@@ -284,63 +180,18 @@ async fn fetch_models(provider: &str, base_url: &str, api_key: &str) -> Result<V
 /// ZHUO_API_KEY / ZHUO_MODEL），再用数据库里用户在设置面板保存的值覆盖。
 /// 优先级：.env 显式配置的 api_key 最高，避免「只读数据库」导致 .env 的 key
 /// 明明生效、接口却显示未配置的不一致。
-pub(crate) fn connection_settings(st: &ServerState) -> ConnectionSettings {
-    let mut cfg = ConnectionSettings {
-        provider: "ollama".into(),
-        base_url: ollama_root(&st.base_url),
-        api_key: (*st.api_key).clone(),
-        model: (*st.model).clone(),
-        summary_model: (*st.summary_model).clone(),
-        num_gpu: st.main_num_gpu,
-        temperature: 0.8,
-        max_tokens: 1024,
-        top_p: 1.0,
-        frequency_penalty: 0.0,
-        presence_penalty: 0.0,
-        repetition_penalty: 1.0,
-    };
-    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
-    let raw_saved = mem.get_setting("connection").ok().flatten();
-    let has_saved_summary_model = raw_saved
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .is_some_and(|value| value.get("summary_model").is_some());
-    let saved = raw_saved.and_then(|s| serde_json::from_str::<ConnectionSettings>(&s).ok());
-    if let Some(saved) = saved {
-        if !saved.base_url.trim().is_empty() {
-            cfg.base_url = saved.base_url;
-        }
-        if !saved.model.trim().is_empty() {
-            cfg.model = saved.model;
-        }
-        if has_saved_summary_model {
-            cfg.summary_model = saved.summary_model;
-        }
-        cfg.num_gpu = saved.num_gpu.clamp(0, 99);
-        if !st.env_api_key && !saved.api_key.trim().is_empty() && saved.api_key != "••••••••"
-        {
-            cfg.api_key = saved.api_key;
-        }
-
-        cfg.provider = saved.provider;
-        cfg.temperature = saved.temperature;
-        cfg.max_tokens = saved.max_tokens;
-        cfg.top_p = saved.top_p;
-        cfg.frequency_penalty = saved.frequency_penalty;
-        cfg.presence_penalty = saved.presence_penalty;
-        cfg.repetition_penalty = saved.repetition_penalty;
-    }
-    if cfg.provider == "ollama" {
-        cfg.base_url = ollama_root(&cfg.base_url);
-    }
-    cfg
-}
-
 pub async fn ollama_tags(State(st): State<ServerState>) -> Json<serde_json::Value> {
     match fetch_ollama_models(&connection_settings(&st).base_url).await {
         Ok(models) => Json(json!({"models": models})),
         Err(e) => Json(json!({"error": e})),
     }
+}
+
+#[derive(Deserialize)]
+pub struct ConnectionModelsRequest {
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
 }
 
 pub async fn connection_models(
@@ -353,25 +204,6 @@ pub async fn connection_models(
 }
 
 /// 标注实际生效的 api_key 来源，便于前端与 .env 对账。
-fn api_key_source(st: &ServerState) -> &'static str {
-    if st.env_api_key {
-        return "env";
-    }
-    let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
-    let in_db = mem
-        .get_setting("connection")
-        .ok()
-        .flatten()
-        .and_then(|s| serde_json::from_str::<ConnectionSettings>(&s).ok())
-        .map(|c| !c.api_key.trim().is_empty() && c.api_key != "••••••••")
-        .unwrap_or(false);
-    if in_db {
-        "settings"
-    } else {
-        "default"
-    }
-}
-
 #[derive(Deserialize)]
 pub struct ResetRequest {
     pub card: String,
@@ -401,179 +233,6 @@ fn prompt_payload(
         "estimated_tokens": estimated_tokens,
         "history_messages": history_messages,
     })
-}
-
-fn card_lore_entries(
-    card: &zhuo_card::Card,
-    world: &str,
-    worldbook: Option<&zhuo_card::WorldBook>,
-    client_entries: &[ChatLoreEntry],
-    legacy_world_info: &[String],
-    history: Option<&[String]>,
-) -> Vec<zhuo_memory::LoreEntry> {
-    let mut entries = Vec::new();
-
-    for (field, title, content) in [
-        ("description", "角色背景", card.description.as_str()),
-        ("personality", "角色性格", card.personality.as_str()),
-        ("scenario", "故事场景", card.scenario.as_str()),
-        ("system_prompt", "角色指令", card.system_prompt.as_str()),
-        ("first_mes", "开场白", card.first_mes.as_str()),
-        ("mes_example", "示例对话", card.mes_example.as_str()),
-        (
-            "post_history_instructions",
-            "历史后指令",
-            card.post_history_instructions.as_str(),
-        ),
-        ("creator_notes", "创作者注释", card.creator_notes.as_str()),
-    ] {
-        push_lore_entry(
-            &mut entries,
-            format!("card:{field}"),
-            title.into(),
-            card.name.clone(),
-            content,
-            false,
-        );
-    }
-    for (index, greeting) in card.alternate_greetings.iter().enumerate() {
-        push_lore_entry(
-            &mut entries,
-            format!("card:alternate_greeting:{index}"),
-            format!("替代开场白 {}", index + 1),
-            card.name.clone(),
-            greeting,
-            false,
-        );
-    }
-    if !card.tags.is_empty() {
-        push_lore_entry(
-            &mut entries,
-            "card:tags".into(),
-            "角色标签".into(),
-            card.name.clone(),
-            &card.tags.join(" "),
-            false,
-        );
-    }
-
-    if let Some(book) = &card.character_book {
-        append_worldbook(&mut entries, "card-book", book, history);
-    }
-    if let Some(book) = worldbook {
-        append_worldbook(&mut entries, "imported-book", book, history);
-    }
-    for (index, content) in world.split("\n\n").enumerate() {
-        push_lore_entry(
-            &mut entries,
-            format!("world:{index}"),
-            format!("世界设定 {}", index + 1),
-            card.name.clone(),
-            content,
-            false,
-        );
-    }
-    for (index, entry) in client_entries.iter().enumerate() {
-        if !entry.enabled {
-            continue;
-        }
-        if let Some(history) = history {
-            let latest = history.last().map(|s| s.to_lowercase()).unwrap_or_default();
-            if !entry
-                .keys
-                .split([',', '，'])
-                .map(str::trim)
-                .any(|key| !key.is_empty() && latest.contains(&key.to_lowercase()))
-            {
-                continue;
-            }
-        }
-        push_lore_entry(
-            &mut entries,
-            format!("client-lore:{index}:{}", entry.id),
-            "自定义世界书".into(),
-            entry.keys.clone(),
-            &entry.content,
-            history.is_some(),
-        );
-    }
-    for (index, content) in legacy_world_info.iter().enumerate() {
-        push_lore_entry(
-            &mut entries,
-            format!("legacy-world-info:{index}"),
-            "旧版世界信息".into(),
-            card.name.clone(),
-            content,
-            false,
-        );
-    }
-    entries
-}
-
-fn push_lore_entry(
-    out: &mut Vec<zhuo_memory::LoreEntry>,
-    source_key: String,
-    title: String,
-    triggers: String,
-    content: &str,
-    constant: bool,
-) {
-    if !content.trim().is_empty() {
-        out.push(zhuo_memory::LoreEntry {
-            source_key,
-            title,
-            triggers,
-            secondary_triggers: String::new(),
-            content: content.trim().to_string(),
-            constant,
-            enabled: true,
-            selective: false,
-            case_sensitive: false,
-            match_whole_words: true,
-            order: 0,
-            scan_depth: None,
-        });
-    }
-}
-
-fn append_worldbook(
-    out: &mut Vec<zhuo_memory::LoreEntry>,
-    source: &str,
-    book: &zhuo_card::WorldBook,
-    history: Option<&[String]>,
-) {
-    let active = history.map(|messages| zhuo_card::activated_entries(book, messages));
-    for (index, entry) in book
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| entry.enabled)
-    {
-        if active
-            .as_ref()
-            .is_some_and(|entries| !entries.contains(entry))
-        {
-            continue;
-        }
-        out.push(zhuo_memory::LoreEntry {
-            source_key: format!("{source}:{index}:{}", entry.id),
-            title: if entry.id.is_empty() {
-                format!("{} 条目 {}", book.name, index + 1)
-            } else {
-                format!("{} {}", book.name, entry.id)
-            },
-            triggers: entry.keys.join(","),
-            secondary_triggers: entry.secondary_keys.join(","),
-            content: entry.content.clone(),
-            constant: entry.constant || history.is_some(),
-            enabled: entry.enabled,
-            selective: entry.selective,
-            case_sensitive: entry.case_sensitive,
-            match_whole_words: entry.match_whole_words,
-            order: entry.order,
-            scan_depth: entry.scan_depth,
-        });
-    }
 }
 
 /// GET /api/cards —— 卡列表（id/名称/描述/首句/精简 system）。id 是内容短 hash。
@@ -1214,7 +873,7 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
 
         match result {
             Ok(StreamOutcome { content, usage, .. }) if !content.is_empty() => {
-                let mut processed = apply_output_regex(&content, &regex_scripts);
+                let mut processed = lore::apply_output_regex(&content, &regex_scripts);
                 for token in ["{{user}}", "{{User}}", "{{USER}}"] {
                     processed = processed.replace(token, &user_name);
                 }
@@ -1279,41 +938,6 @@ fn generation_error_message(error: &anyhow::Error) -> String {
     } else {
         format!("{error:#}")
     }
-}
-
-fn apply_output_regex(input: &str, scripts: &[RegexScript]) -> String {
-    scripts
-        .iter()
-        .filter(|s| {
-            !s.disabled
-                && !s.prompt_only
-                && !s.find_regex.trim().is_empty()
-                && (s.placement.is_empty() || s.placement.contains(&2))
-        })
-        .fold(input.to_string(), |text, script| {
-            let raw = script.find_regex.trim();
-            let (pattern, flags) = if raw.starts_with('/') && raw[1..].rfind('/').is_some() {
-                let end = raw.rfind('/').unwrap();
-                (&raw[1..end], &raw[end + 1..])
-            } else {
-                (raw, "")
-            };
-            let mut builder = regex::RegexBuilder::new(pattern);
-            builder
-                .case_insensitive(flags.contains('i'))
-                .multi_line(flags.contains('m'))
-                .dot_matches_new_line(flags.contains('s'));
-            let Ok(re) = builder.build() else { return text };
-            let replacement = script
-                .replace_string
-                .replace("{{match}}", "$0")
-                .replace("$&", "$0");
-            if flags.contains('g') {
-                re.replace_all(&text, replacement.as_str()).to_string()
-            } else {
-                re.replace(&text, replacement.as_str()).to_string()
-            }
-        })
 }
 
 /// GET /api/history?card= —— 从 SQLite 读对话历史（card 传 id 或名称均可）
@@ -1803,7 +1427,8 @@ mod compatibility_tests {
 
     #[test]
     fn st_output_regex_honors_flags_placement_and_capture_groups() {
-        let scripts = vec![RegexScript {
+        use crate::services::lore;
+        let scripts = vec![crate::config::RegexScript {
             script_name: "clean".into(),
             find_regex: "/foo (bar)/gi".into(),
             replace_string: "[$1]".into(),
@@ -1812,13 +1437,13 @@ mod compatibility_tests {
             prompt_only: false,
         }];
         assert_eq!(
-            apply_output_regex("Foo bar, foo BAR", &scripts),
+            lore::apply_output_regex("Foo bar, foo BAR", &scripts),
             "[bar], [BAR]"
         );
-        let ignored = RegexScript {
+        let ignored = crate::config::RegexScript {
             placement: vec![1],
             ..scripts[0].clone()
         };
-        assert_eq!(apply_output_regex("foo bar", &[ignored]), "foo bar");
+        assert_eq!(lore::apply_output_regex("foo bar", &[ignored]), "foo bar");
     }
 }

@@ -11,6 +11,7 @@
 //!   ZHUO_NO_USAGE=1 不请求 stream_options.include_usage
 
 mod prompt;
+mod config;
 mod routes;
 pub mod services;
 mod state;
@@ -76,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1127);
-    let connection = routes::connection_settings(&st);
+    let connection = crate::config::connection_settings(&st);
 
     println!("酌 / zhuo-server");
     println!("  推理端点   : {}", st.base_url);

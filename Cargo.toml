@@ -3,7 +3,6 @@ resolver = "2"
 members = [
     "crates/zhuo-llm",
     "crates/zhuo-card",
-    "crates/zhuo-session",
     "crates/zhuo-memory",
     "crates/zhuo-server",
 ]

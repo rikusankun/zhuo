@@ -9,3 +9,4 @@
 
 pub mod memory_service;
 pub mod summarize;
+pub mod lore;

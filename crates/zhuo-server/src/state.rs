@@ -263,7 +263,7 @@ mod tests {
             env_api_key: false,
         };
 
-        let connection = crate::routes::connection_settings(&state);
+        let connection = crate::config::connection_settings(&state);
         assert_eq!(connection.model, "selected-main");
         assert_eq!(connection.summary_model, "selected-summary");
         assert_eq!(connection.num_gpu, 27);
