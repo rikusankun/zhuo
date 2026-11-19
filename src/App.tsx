@@ -28,7 +28,7 @@ function AppContent() {
 
   // 所有 Hook 调用都在这里
   const { data: { connection, saved }, actions: { setConnection, normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
-  const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, loadModels, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
+  const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
   const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
   const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setLore } } = useContext();
   const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
@@ -59,8 +59,6 @@ function AppContent() {
       })
       .catch(() => addToast('error', '无法连接后端，请先运行 npm run start。')); 
   }, []);
-
-  useEffect(() => { if (panel === 'settings') void loadModels(); }, [panel, loadModels]);
 
   useEffect(() => { 
     if (!userMenuOpen) return; 
