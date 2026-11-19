@@ -35,7 +35,7 @@ export default function App() {
   const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
   const { compat, importAsset, exportCard } = useAssetManager({ connection, cardId });
 
-  const { chats, chatId, setChatId, messages, input, setInput, busy, loading, usage, promptChars, promptTokens, abort, newChat, deleteChat, renameChat, send, regenerate } = useConversation(cardId, { persona, lore_entries: lore }, []);
+  const { data: { chats, chatId, messages, input, busy, loading, usage, promptChars, promptTokens, abort }, actions: { setChatId, setInput, newChat, deleteChat, renameChat, send, regenerate } } = useConversation(cardId, { persona, lore_entries: lore }, []);
 
   const handleDeleteCard = useCallback(async (item: Card) => {
     await characterDeleteCard(item);

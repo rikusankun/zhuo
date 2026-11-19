@@ -1,21 +1,47 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { api, isApiError, type Chat, type ChatInput, type Message, type RegexScript } from '../api/client';
 import { consumeChatStream } from '../api/sse';
 import { applyRegex } from '../lib/regex';
 import { useToast } from './useToast';
+import type { HookReturn } from './types';
+
+export type UseConversationData = {
+  chats: Chat[];
+  chatId: string;
+  messages: Message[];
+  input: string;
+  busy: boolean;
+  loading: boolean;
+  usage: number | null;
+  promptChars: number | null;
+  promptTokens: number | null;
+  abort: React.MutableRefObject<AbortController | null>;
+};
+
+export type UseConversationActions = {
+  setChats: Dispatch<SetStateAction<Chat[]>>;
+  setChatId: Dispatch<SetStateAction<string>>;
+  setMessages: Dispatch<SetStateAction<Message[]>>;
+  setInput: Dispatch<SetStateAction<string>>;
+  newChat: () => Promise<void>;
+  deleteChat: (id: string) => Promise<void>;
+  renameChat: () => Promise<void>;
+  send: (override?: string, regenerate?: boolean) => Promise<void>;
+  regenerate: () => void;
+};
 
 export function useConversation(
   cardId: string,
   context: Pick<ChatInput, 'persona' | 'lore_entries'>,
   regexScripts: RegexScript[],
-) {
+): HookReturn<UseConversationData, UseConversationActions> {
   const { addToast } = useToast();
   const [chats, setChats] = useState<Chat[]>([]);
-  const [chatId, setChatId] = useState('');
+  const [chatId, setChatId] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [input, setInput] = useState<string>('');
+  const [busy, setBusy] = useState<boolean>(false);
+  const [loading, setLoading] = useState<boolean>(false);
   const [usage, setUsage] = useState<number | null>(null);
   const [promptChars, setPromptChars] = useState<number | null>(null);
   const [promptTokens, setPromptTokens] = useState<number | null>(null);
@@ -59,7 +85,7 @@ export function useConversation(
 
   useEffect(() => () => { abort.current?.abort(); }, []);
 
-  async function newChat() {
+  const newChat = useCallback(async () => {
     if (!cardId || locked.current || loading) return;
     const current = cardId;
     locked.current = true;
@@ -73,9 +99,9 @@ export function useConversation(
       addToast('success', '已创建新对话');
     } catch (e) { addToast('error', String(e)); }
     finally { locked.current = false; setBusy(false); }
-  }
+  }, [cardId, loading, addToast]);
 
-  async function deleteChat(id: string) {
+  const deleteChat = useCallback(async (id: string) => {
     if (locked.current || !confirm('删除这个对话及全部消息？此操作不可撤销。')) return;
     const current = cardId;
     try {
@@ -87,9 +113,9 @@ export function useConversation(
       setChats(next);
       if (selection.current.chatId === id) setChatId(next[0]?.id || '');
     } catch (e) { addToast('error', String(e)); }
-  }
+  }, [cardId, chats, addToast]);
 
-  async function renameChat() {
+  const renameChat = useCallback(async () => {
     const chat = chats.find(row => row.id === chatId);
     if (!chat) return;
     const title = prompt('对话名称', chat.title)?.trim();
@@ -100,9 +126,9 @@ export function useConversation(
       if (!result.ok) { addToast('error', '对话不存在，请刷新'); return; }
       setChats(rows => rows.map(row => row.id === chat.id ? { ...row, title } : row));
     } catch (e) { addToast('error', String(e)); }
-  }
+  }, [chats, chatId, addToast]);
 
-  async function send(override?: string, regenerate = false) {
+  const send = useCallback(async (override?: string, regenerate = false) => {
     const text = (override ?? input).trim();
     if (!text || !cardId || locked.current || loading) return;
     locked.current = true;
@@ -162,13 +188,20 @@ export function useConversation(
       locked.current = false; setBusy(false);
       if (abort.current === controller) abort.current = null;
     }
-  }
+  }, [cardId, chatId, input, loading, messages, context, regexScripts, addToast]);
 
-  function regenerate() {
+  const regenerate = useCallback(() => {
     const user = messages.at(-2);
     if (user?.role === 'user' && messages.at(-1)?.role === 'assistant') void send(user.content, true);
-  }
+  }, [messages, send]);
 
-  return { chats, setChats, chatId, setChatId, messages, setMessages, input, setInput,
-    busy, loading, usage, promptChars, promptTokens, abort, newChat, deleteChat, renameChat, send, regenerate };
+  return {
+    data: { chats, chatId, messages, input, busy, loading, usage, promptChars, promptTokens, abort },
+    actions: { setChats, setChatId, setMessages, setInput, newChat, deleteChat, renameChat, send, regenerate },
+    status: {
+      isLoading: busy || loading,
+      error: null,
+      success: null,
+    },
+  };
 }
