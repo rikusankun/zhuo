@@ -198,8 +198,68 @@ pub async fn fetch_models(provider: &str, base_url: &str, api_key: &str) -> Resu
     }
     match provider {
         "ollama" => fetch_ollama_models(base_url).await,
+        "anthropic" => fetch_anthropic_models(base_url, api_key).await,
+        "google" => fetch_google_models(base_url, api_key).await,
         _ => fetch_openai_models(base_url, api_key).await,
     }
+}
+
+async fn fetch_anthropic_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("create Anthropic client: {e}"))?;
+    let response = client
+        .get(&url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await
+        .map_err(|e| format!("Anthropic models request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(format!("Anthropic models returned HTTP {status}: {detail}"));
+    }
+    let payload: Value = response.json().await.map_err(|e| format!("parse Anthropic models response: {e}"))?;
+    Ok(payload
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect())
+}
+
+async fn fetch_google_models(base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/v1beta/models?key={}", base_url.trim_end_matches('/'), api_key);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("create Google client: {e}"))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Google models request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        return Err(format!("Google models returned HTTP {status}: {detail}"));
+    }
+    let payload: Value = response.json().await.map_err(|e| format!("parse Google models response: {e}"))?;
+    Ok(payload
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get("name").and_then(Value::as_str))
+        .map(|name| name.strip_prefix("models/").unwrap_or(name).to_string())
+        .collect())
 }
 
 fn prompt_payload(

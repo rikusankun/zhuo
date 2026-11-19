@@ -12,6 +12,7 @@
 
 mod prompt;
 mod config;
+mod providers;
 mod routes;
 pub mod services;
 mod state;

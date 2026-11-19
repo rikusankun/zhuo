@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::config::{api_base_url, connection_settings, uses_native_ollama, RegexScript};
+use crate::providers::{provider_for, LlmEvent};
 use crate::services::{lore, memory_service};
 use crate::services::lore::card_lore_entries;
 use crate::prompt::{
@@ -158,10 +159,11 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
     );
 
     let connection = connection_settings(&st);
+    let connection_clone = connection.clone();
     let native = uses_native_ollama(&connection, st.ollama_native);
     let base = api_base_url(&connection, native);
-    let key = connection.api_key;
-    let model = req.model.as_deref().unwrap_or(&connection.model).to_string();
+    let key = connection_clone.api_key;
+    let model = req.model.as_deref().unwrap_or(&connection_clone.model).to_string();
     let st2 = st.clone();
     let input = if req.display_message.trim().is_empty() {
         req.message.clone()
@@ -187,25 +189,28 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
         ]
         .into_iter()
         .collect();
-        let cfg = StreamConfig {
-            base_url: base.as_str(),
-            api_key: key.as_str(),
-            model: model.as_str(),
-            include_usage: st2.include_usage,
-            dump_path: None,
-            response_format: None,
-            temperature: Some(connection.temperature),
-            max_tokens: Some(connection.max_tokens),
-            top_p: Some(connection.top_p),
-            frequency_penalty: Some(connection.frequency_penalty),
-            presence_penalty: Some(connection.presence_penalty),
-            repetition_penalty: Some(connection.repetition_penalty),
-            num_gpu: (connection.provider == "ollama").then_some(connection.num_gpu).flatten(),
-            ollama_native: native,
-            stop: Some(&stop_strings),
-        };
+        let is_ollama = connection_clone.provider == "ollama";
+        let provider = provider_for(&connection_clone.provider);
+
         let mut partial = String::new();
-        let result = {
+        let result = if is_ollama {
+            let cfg = StreamConfig {
+                base_url: base.as_str(),
+                api_key: key.as_str(),
+                model: model.as_str(),
+                include_usage: st2.include_usage,
+                dump_path: None,
+                response_format: None,
+                temperature: Some(connection_clone.temperature),
+                max_tokens: Some(connection_clone.max_tokens),
+                top_p: Some(connection_clone.top_p),
+                frequency_penalty: Some(connection_clone.frequency_penalty),
+                presence_penalty: Some(connection_clone.presence_penalty),
+                repetition_penalty: Some(connection_clone.repetition_penalty),
+                num_gpu: (connection_clone.provider == "ollama").then_some(connection_clone.num_gpu).flatten(),
+                ollama_native: native,
+                stop: Some(&stop_strings),
+            };
             let generation = zhuo_llm::stream_chat_ex_with_first_token_timeout(
                 &cfg,
                 &msgs,
@@ -219,17 +224,58 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
                 result = generation => Some(result),
                 _ = tx.closed() => None,
             }
+        } else {
+            let url = provider.chat_url(&connection, &model);
+            let headers = provider.build_headers(&key);
+            let body = provider.build_request_body(
+                msgs.clone(),
+                &model,
+                connection_clone.temperature,
+                connection_clone.max_tokens,
+                connection_clone.top_p,
+                Some(stop_strings.clone()),
+            );
+            let tx2 = tx.clone();
+            let stream_result = provider.stream_chat(url, headers, body, Box::new(move |event| {
+                match event {
+                    LlmEvent::Token(tok) => {
+                        let _ = tx2.send(json!({ "token": tok }).to_string());
+                    }
+                    LlmEvent::Error(err) => {
+                        let _ = tx2.send(json!({ "error": err }).to_string());
+                    }
+                    LlmEvent::Usage(Some(n)) => {
+                        let _ = tx2.send(json!({ "usage": { "total_tokens": n } }).to_string());
+                    }
+                    _ => {}
+                }
+            }));
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                stream_result,
+            ).await {
+                Ok(Ok(full_text)) => {
+                    partial = full_text.clone();
+                    Some(Ok(zhuo_llm::StreamOutcome {
+                        content: full_text,
+                        aborted: false,
+                        ..Default::default()
+                    }))
+                }
+                Ok(Err(e)) => Some(Err(anyhow::anyhow!(e))),
+                Err(_) => Some(Err(anyhow::anyhow!("provider request timed out"))),
+            }
         };
         let result = match result {
             None => Ok(StreamOutcome {
-                content: partial,
+                content: partial.clone(),
                 aborted: true,
                 ..Default::default()
             }),
             Some(Err(e)) if !partial.is_empty() => {
                 let _ = tx.send(json!({"error": generation_error_message(&e)}).to_string());
                 Ok(StreamOutcome {
-                    content: partial,
+                    content: partial.clone(),
                     aborted: true,
                     ..Default::default()
                 })
