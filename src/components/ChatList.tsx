@@ -4,7 +4,7 @@ import type { Chat } from '../api/client';
 export type ChatListProps = {
   chats: Chat[];
   chatId: string;
-  setChatId: (id: string) => void;
+  selectChat: (id: string) => void;
   busy: boolean;
   cardId: string;
   newChat: () => void;
@@ -15,7 +15,7 @@ export type ChatListProps = {
 export function ChatList({
   chats,
   chatId,
-  setChatId,
+  selectChat,
   busy,
   cardId,
   newChat,
@@ -31,7 +31,7 @@ export function ChatList({
       <div className="chat-list">
         {chats.map(x => (
           <div key={x.id} className={`chat-row ${chatId === x.id ? 'selected' : ''}`}>
-            <button disabled={busy} onDoubleClick={() => renameChat()} onClick={() => { setChatId(x.id); }}>
+            <button disabled={busy} onDoubleClick={() => renameChat()} onClick={() => { selectChat(x.id); }}>
               <MessageCircle size={15} /><span>{x.title}</span>
             </button>
             <button className="row-delete" disabled={busy} onClick={() => deleteChat(x.id)}><Trash2 size={14} /></button>

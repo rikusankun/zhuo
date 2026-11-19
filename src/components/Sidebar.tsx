@@ -21,7 +21,7 @@ export type SidebarProps = {
   deleteCard: (item: Card) => Promise<void>;
   chats: Chat[];
   chatId: string;
-  setChatId: (id: string) => void;
+  selectChat: (id: string) => void;
   deleteChat: (id: string) => void;
   renameChat: () => void;
   setUserMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
@@ -45,7 +45,7 @@ export function Sidebar({
   deleteCard,
   chats,
   chatId,
-  setChatId,
+  selectChat,
   deleteChat,
   renameChat,
   setUserMenuOpen,
@@ -76,7 +76,7 @@ export function Sidebar({
       <ChatList
         chats={chats}
         chatId={chatId}
-        setChatId={setChatId}
+        selectChat={selectChat}
         busy={busy}
         cardId={cardId}
         newChat={newChat}

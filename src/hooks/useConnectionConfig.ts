@@ -4,18 +4,18 @@ import { useToast } from './useToast';
 import type { HookReturn } from './types';
 
 const defaults: Connection = {
-  provider: 'ollama',
-  base_url: 'http://127.0.0.1:11434',
+  provider: '',
+  base_url: '',
   api_key: '',
-  model: 'qwen2.5-coder:3b',
+  model: '',
   summary_model: '',
-  num_gpu: 15,
-  temperature: 0.8,
-  max_tokens: 1024,
-  top_p: 1.0,
+  num_gpu: 0,
+  temperature: 0.0,
+  max_tokens: 0,
+  top_p: 0.0,
   frequency_penalty: 0.0,
   presence_penalty: 0.0,
-  repetition_penalty: 1.0,
+  repetition_penalty: 0.0,
 };
 
 export type UseConnectionConfigData = {

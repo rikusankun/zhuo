@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Brain, Menu, X } from 'lucide-react';
 import { api, isApiError, type Card } from './api/client';
 // 注意：这里只导入 Hook，不要在这里调用
@@ -30,10 +30,11 @@ function AppContent() {
   const { data: { connection, saved }, actions: { setConnection, normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
   const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, loadModels, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
   const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
-  const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setPersona, setLore } } = useContext();
+  const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setLore } } = useContext();
   const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
-  const { data: { compat }, actions: { importAsset, exportCard } } = useAssetManager({ connection, cardId });
-  const { data: { chats, chatId, messages, input, busy, loading, usage, promptChars, promptTokens, abort }, actions: { setChatId, setInput, newChat, deleteChat, renameChat, send, regenerate } } = useConversation(cardId, { persona, lore_entries: lore }, []);
+  const { data: { compat, regexScripts }, actions: { importAsset, exportCard } } = useAssetManager({ connection, cardId });
+  const context = useMemo(() => ({ persona, lore_entries: lore }), [persona, lore]);
+  const { data: { chats, chatId, messages, input, busy, loading, usage, promptChars, promptTokens, abort }, actions: { selectChat, setInput, newChat, deleteChat, renameChat, send, regenerate } } = useConversation(cardId, context, regexScripts);
 
   const handleDeleteCard = useCallback(async (item: Card) => {
     await characterDeleteCard(item);
@@ -84,7 +85,7 @@ function AppContent() {
         busy={busy} newChat={newChat} setCreateDialog={setCreateDialog} 
         fileInput={fileInput} importCard={importCard} 
         deleteCard={handleDeleteCard} 
-        chats={chats} chatId={chatId} setChatId={setChatId} 
+        chats={chats} chatId={chatId} selectChat={selectChat} 
         deleteChat={deleteChat} renameChat={renameChat} 
         setUserMenuOpen={setUserMenuOpen} userMenuOpen={userMenuOpen} 
         setPanel={setPanel} 

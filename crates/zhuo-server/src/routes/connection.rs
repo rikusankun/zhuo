@@ -3,7 +3,7 @@ use axum::Json;
 use serde_json::json;
 
 use crate::config::{api_key_source, connection_settings, ConnectionSettings};
-use crate::routes::ConnectionModelsRequest;
+use crate::routes::{ConnectionModelsRequest};
 use crate::state::ServerState;
 
 pub async fn ollama_tags(State(st): State<ServerState>) -> Json<serde_json::Value> {
@@ -24,14 +24,13 @@ pub async fn connection_models(
 
 pub async fn get_connection(State(st): State<ServerState>) -> Json<serde_json::Value> {
     let mut cfg = connection_settings(&st);
-    let configured = !cfg.api_key.trim().is_empty();
-    cfg.api_key = if configured {
-        "••••••••".into()
-    } else {
-        String::new()
-    };
+    let configured = !cfg.base_url.trim().is_empty() && !cfg.model.trim().is_empty();
+    if configured && !cfg.api_key.trim().is_empty() {
+        cfg.api_key = "••••••••".into();
+    }
+    let connection_value = if configured { json!(cfg) } else { json!(null) };
     Json(json!({
-        "connection": cfg,
+        "connection": connection_value,
         "api_key_configured": configured,
         "api_key_source": api_key_source(&st),
     }))
@@ -44,7 +43,7 @@ pub async fn set_connection(
     if cfg.base_url.trim().is_empty() || cfg.model.trim().is_empty() {
         return Json(json!({"error":"Base URL 和模型不能为空"}));
     }
-    if !matches!(cfg.provider.as_str(), "ollama" | "openai") {
+    if !matches!(cfg.provider.as_str(), "ollama" | "openai" | "openai_compatible") {
         return Json(json!({"error":"不支持的服务类型"}));
     }
     cfg.base_url = cfg.base_url.trim().trim_end_matches('/').to_string();

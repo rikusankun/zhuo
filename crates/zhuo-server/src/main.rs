@@ -86,8 +86,14 @@ async fn main() -> anyhow::Result<()> {
     let connection = crate::config::connection_settings(&st);
 
     println!("酌 / zhuo-server");
-    println!("  推理端点   : {}", st.base_url);
-    println!("  模型       : {}", connection.model);
+    let configured = !connection.base_url.trim().is_empty() && !connection.model.trim().is_empty();
+    if configured {
+        println!("  推理端点   : {}", connection.base_url);
+        println!("  模型       : {}", connection.model);
+    } else {
+        println!("  推理端点   : 尚未配置推理服务，请在设置面板中连接");
+        println!("  模型       : 尚未配置推理服务，请在设置面板中连接");
+    }
     println!("  角色卡目录 : {:?}", st.cards_dir);
     println!("  记忆库     : SQLite FTS5 + jieba（ZHUO_DB，默认 zhuo.db）");
     if !connection.summary_model.trim().is_empty() {
@@ -98,21 +104,25 @@ async fn main() -> anyhow::Result<()> {
     } else {
         println!("  提取模型   : 未启用（可在设置面板选择记忆提取模型）");
     }
-    if std::env::var("ZHUO_MODEL").is_err() && connection.model == "qwen2.5-coder:3b" {
+    if configured && std::env::var("ZHUO_MODEL").is_err() && connection.model == "qwen2.5-coder:3b" {
         println!("  [提示] 未设置 ZHUO_MODEL，默认 qwen2.5-coder:3b；本机缓存的完整名可用 ollama list 查看");
     }
     println!(
         "  GPU 分流     : 主模型 num_gpu={} / 提取模型 num_gpu=0（强制 CPU）",
         connection.num_gpu
     );
-    println!(
-        "  推理通道     : {}",
-        if st.ollama_native {
-            "Ollama 原生 /api/chat（options.num_gpu 生效）"
-        } else {
-            "OpenAI 兼容 /v1/chat/completions"
-        }
-    );
+    if configured {
+        println!(
+            "  推理通道     : {}",
+            if st.ollama_native {
+                "Ollama 原生 /api/chat（options.num_gpu 生效）"
+            } else {
+                "OpenAI 兼容 /v1/chat/completions"
+            }
+        );
+    } else {
+        println!("  推理通道     : 未配置，请先在设置面板中填写服务地址与模型");
+    }
 
     let app = Router::new()
         .route("/", get(routes::index))

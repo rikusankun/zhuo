@@ -1,4 +1,4 @@
-import { useCallback, useState, type Dispatch, type SetStateAction } from 'react';
+import { useCallback, useEffect, useState, type Dispatch, type SetStateAction } from 'react';
 import { api, isApiError, type Connection, type RegexScript } from '../api/client';
 import { useToast } from './useToast';
 import type { HookReturn } from './types';
@@ -27,6 +27,18 @@ export function useAssetManager(input: UseAssetManagerInput): HookReturn<UseAsse
   const [loading, setLoading] = useState(false);
   const [assetError, setAssetError] = useState<string | null>(null);
   const [assetSuccess, setAssetSuccess] = useState<string | null>(null);
+
+  // 启动时从后端加载已存的 regex_scripts，避免重启后 Regex 功能假死
+  useEffect(() => {
+    void api.compatibility.get().then(result => {
+      if (isApiError(result)) return;
+      const scripts = result.regex_scripts;
+      if (Array.isArray(scripts)) {
+        setRegexScripts(scripts);
+        setCompat(v => ({ ...v, regex: scripts.length }));
+      }
+    }).catch(() => {});
+  }, []);
 
   const importAsset = useCallback(async (kind: 'worldbook' | 'preset' | 'regex', file?: File) => {
     if (!file) return;

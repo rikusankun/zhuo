@@ -2,7 +2,6 @@
 //! 服务层不应依赖路由层，故此处下沉所有与连接设置相关的纯函数。
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use crate::state::ServerState;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,22 +33,22 @@ pub struct ConnectionSettings {
 }
 
 fn default_provider() -> String {
-    "ollama".into()
+    String::new()
 }
 fn default_temperature() -> f32 {
-    0.8
+    0.0
 }
 fn default_max_tokens() -> u32 {
-    1024
+    0
 }
 fn default_top_p() -> f32 {
-    1.0
+    0.0
 }
 fn default_repetition_penalty() -> f32 {
-    1.0
+    0.0
 }
 fn default_num_gpu() -> i64 {
-    15
+    0
 }
 
 pub fn ollama_root(base_url: &str) -> String {
@@ -76,42 +75,37 @@ pub fn uses_native_ollama(connection: &ConnectionSettings, enabled: bool) -> boo
 }
 
 pub fn connection_settings(st: &ServerState) -> ConnectionSettings {
+    // 空白默认：settings 表里 connection 不存在就是不存在，不回退读环境变量
     let mut cfg = ConnectionSettings {
-        provider: "ollama".into(),
-        base_url: ollama_root(&st.base_url),
-        api_key: (*st.api_key).clone(),
-        model: (*st.model).clone(),
-        summary_model: (*st.summary_model).clone(),
-        num_gpu: st.main_num_gpu,
-        temperature: 0.8,
-        max_tokens: 1024,
-        top_p: 1.0,
+        provider: String::new(),
+        base_url: String::new(),
+        api_key: String::new(),
+        model: String::new(),
+        summary_model: String::new(),
+        num_gpu: 0,
+        temperature: 0.0,
+        max_tokens: 0,
+        top_p: 0.0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,
-        repetition_penalty: 1.0,
+        repetition_penalty: 0.0,
     };
     let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
     let raw_saved = mem.get_setting("connection").ok().flatten();
-    let has_saved_summary_model = raw_saved
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
-        .is_some_and(|value| value.get("summary_model").is_some());
     let saved = raw_saved.and_then(|s| serde_json::from_str::<ConnectionSettings>(&s).ok());
     if let Some(saved) = saved {
+        cfg.provider = saved.provider;
         if !saved.base_url.trim().is_empty() {
             cfg.base_url = saved.base_url;
         }
         if !saved.model.trim().is_empty() {
             cfg.model = saved.model;
         }
-        if has_saved_summary_model {
-            cfg.summary_model = saved.summary_model;
-        }
+        cfg.summary_model = saved.summary_model;
         cfg.num_gpu = saved.num_gpu.clamp(0, 99);
         if !st.env_api_key && !saved.api_key.trim().is_empty() && saved.api_key != "••••••••" {
             cfg.api_key = saved.api_key;
         }
-        cfg.provider = saved.provider;
         cfg.temperature = saved.temperature;
         cfg.max_tokens = saved.max_tokens;
         cfg.top_p = saved.top_p;
@@ -119,7 +113,7 @@ pub fn connection_settings(st: &ServerState) -> ConnectionSettings {
         cfg.presence_penalty = saved.presence_penalty;
         cfg.repetition_penalty = saved.repetition_penalty;
     }
-    if cfg.provider == "ollama" {
+    if !cfg.provider.is_empty() && cfg.provider == "ollama" {
         cfg.base_url = ollama_root(&cfg.base_url);
     }
     cfg
