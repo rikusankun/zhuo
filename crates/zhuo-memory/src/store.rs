@@ -1,129 +1,23 @@
-//! 记忆存储实现：MemoryStore、jieba 分词、FTS5 检索、世界书触发引擎。
+//! MemoryStore：SQLite 连接池管理器与事务协调器。
+//! 持有 Connection，对外委派给 repositories/ 下的各表仓储。
 
-use anyhow::{Context, Result};
-use jieba_rs::Jieba;
+use anyhow::{Context, ensure, Result};
 use rusqlite::Connection;
 use std::path::Path;
-use std::sync::OnceLock;
 use zhuo_llm::Msg;
 
-use crate::config::{INDEX_MIGRATIONS, MIGRATIONS, SCHEMA_SQL, STOPWORDS};
-use crate::types::{ChatRecord, LoreEntry, MemoryHit, PromptHit};
-
-fn jieba() -> &'static Jieba {
-    static JIEBA: OnceLock<Jieba> = OnceLock::new();
-    JIEBA.get_or_init(Jieba::new)
-}
-
-fn is_noise(token: &str) -> bool {
-    if token.chars().all(|c| {
-        c.is_whitespace()
-            || c.is_ascii_punctuation()
-            || matches!(c as u32,
-            0x3000..=0x303F | 0xFF00..=0xFFEF | 0x2018..=0x201D | 0x2026 | 0x2014)
-    }) {
-        return true;
-    }
-    STOPWORDS.contains(&token)
-}
-
-/// jieba 搜索级分词 + 去噪，输出空格分隔的 token 流（FTS5 unicode61 以空格切词）。
-pub fn seg(text: &str) -> String {
-    let mut out: Vec<&str> = Vec::new();
-    for t in jieba().cut_for_search(text, true) {
-        let t = t.trim();
-        if !t.is_empty() && !is_noise(t) && !out.contains(&t) {
-            out.push(t);
-        }
-    }
-    out.join(" ")
-}
-
-/// 把分好的 token 流拼成 FTS5 MATCH 查询语法（OR 语义，bm25 排序自动权衡相关度）。
-pub fn fts5_query(text: &str) -> String {
-    let tokens: Vec<String> = seg(text)
-        .split(' ')
-        .filter(|s| !s.is_empty())
-        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
-        .collect();
-    tokens.join(" OR ")
-}
-
-fn keyword_matches(text: &str, key: &str, case_sensitive: bool, whole: bool) -> bool {
-    if key.is_empty() {
-        return false;
-    }
-    let (hay, needle) = if case_sensitive {
-        (text.to_string(), key.to_string())
-    } else {
-        (text.to_lowercase(), key.to_lowercase())
-    };
-    if !whole {
-        return hay.contains(&needle);
-    }
-    hay.match_indices(&needle).any(|(i, _)| {
-        let before = hay[..i].chars().next_back();
-        let after = hay[i + needle.len()..].chars().next();
-        before
-            .map(|c| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(true)
-            && after
-                .map(|c| !c.is_alphanumeric() && c != '_')
-                .unwrap_or(true)
-    })
-}
-
-fn activated_entries_internal(entries: &[LoreEntry], history: &[String]) -> Vec<LoreEntry> {
-    let mut out: Vec<_> = entries
-        .iter()
-        .filter(|e| e.enabled)
-        .filter(|e| {
-            if e.constant {
-                return true;
-            }
-            let depth = e.scan_depth.unwrap_or(history.len());
-            let text = history
-                .iter()
-                .rev()
-                .take(depth)
-                .rev()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join("\n");
-            let primary_keys: Vec<&str> = e
-                .triggers
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let secondary_keys: Vec<&str> = e
-                .secondary_triggers
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let primary = primary_keys
-                .iter()
-                .any(|k| keyword_matches(&text, k, e.case_sensitive, e.match_whole_words));
-            let secondary = !e.selective
-                || secondary_keys.is_empty()
-                || secondary_keys
-                    .iter()
-                    .any(|k| keyword_matches(&text, k, e.case_sensitive, e.match_whole_words));
-            primary && secondary
-        })
-        .cloned()
-        .collect();
-    out.sort_by_key(|e| e.order);
-    out
-}
+use crate::config::{INDEX_MIGRATIONS, MIGRATIONS, SCHEMA_SQL};
+use crate::repositories::{
+    chat_repo::ChatRepo, memory_repo::MemoryRepo, message_repo::MessageRepo,
+    lore_repo::LoreRepo, settings_repo::SettingsRepo, state_repo::StateRepo,
+};
+use crate::types::ChatRecord;
 
 pub struct MemoryStore {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl MemoryStore {
-    /// 打开（或创建）数据库并建表。
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -132,8 +26,8 @@ impl MemoryStore {
                     .with_context(|| format!("create db dir: {}", parent.display()))?;
             }
         }
-        let conn =
-            Connection::open(path).with_context(|| format!("open sqlite: {}", path.display()))?;
+        let conn = Connection::open(path)
+            .with_context(|| format!("open sqlite: {}", path.display()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
             .context("configure sqlite concurrency")?;
         let me = Self { conn };
@@ -141,7 +35,6 @@ impl MemoryStore {
         Ok(me)
     }
 
-    /// 内存库（测试/临时会话用）
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("open in-memory sqlite")?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
@@ -181,114 +74,72 @@ impl MemoryStore {
              SELECT 'legacy-' || card_name, card_name, '迁移的对话', MIN(created_at), MAX(created_at)
              FROM messages WHERE chat_id = '' GROUP BY card_name;
              UPDATE messages SET chat_id = 'legacy-' || card_name WHERE chat_id = '';",
-        ).context("migrate legacy conversations")?;
+        )?;
         Ok(())
     }
 
-    // ---------- Message 表：对话历史 ----------
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    // ---------- Message 表（委派给 MessageRepo） ----------
 
     pub fn add_message(&self, card_name: &str, role: &str, content: &str) -> Result<()> {
-        self.conn
-            .execute(
-                "INSERT INTO messages (card_name, role, content) VALUES (?1, ?2, ?3)",
-                rusqlite::params![card_name, role, content],
-            )
-            .context("insert message")?;
-        Ok(())
+        MessageRepo::add_message(&self.conn, card_name, role, content)
     }
 
-    /// 某角色的最近 `limit` 条消息（按时间正序返回，可直接进 prompt）
     pub fn history(&self, card_name: &str, limit: usize) -> Result<Vec<Msg>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT role, content FROM (
-                 SELECT role, content, id FROM messages
-                 WHERE card_name = ?1 ORDER BY id DESC LIMIT ?2
-             ) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![card_name, limit as i64], |r| {
-            Ok(Msg::new(r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        MessageRepo::history(&self.conn, card_name, limit)
     }
 
     pub fn clear_messages(&self, card_name: &str) -> Result<usize> {
-        self.conn
-            .execute("DELETE FROM messages WHERE card_name = ?1", [card_name])
-            .context("clear messages")
+        MessageRepo::clear_messages(&self.conn, card_name)
     }
 
-    // ---------- Chat sessions ----------
+    pub fn chat_history(&self, chat_id: &str, limit: usize) -> Result<Vec<Msg>> {
+        MessageRepo::chat_history(&self.conn, chat_id, limit)
+    }
+
+    pub fn clear_chat_messages(&self, chat_id: &str) -> Result<usize> {
+        MessageRepo::clear_chat_messages(&self.conn, chat_id)
+    }
+
+    pub fn count_unprocessed(&self, card_name: &str) -> Result<usize> {
+        MessageRepo::count_unprocessed(&self.conn, card_name)
+    }
+
+    pub fn unprocessed(&self, card_name: &str, limit: usize) -> Result<Vec<(i64, Msg)>> {
+        MessageRepo::unprocessed(&self.conn, card_name, limit)
+    }
+
+    pub fn mark_processed(&self, card_name: &str, upto_id: i64) -> Result<usize> {
+        MessageRepo::mark_processed(&self.conn, card_name, upto_id)
+    }
+
+    pub fn last_chat_message_id(&self, chat_id: &str) -> Result<i64> {
+        MessageRepo::last_chat_message_id(&self.conn, chat_id)
+    }
+
+    // ---------- Chat 会话表（委派给 ChatRepo） ----------
 
     pub fn create_chat(&self, id: &str, card: &str, title: &str) -> Result<ChatRecord> {
-        self.conn
-            .execute(
-                "INSERT INTO chats (id, card_name, title) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, card, title],
-            )
-            .context("create chat")?;
-        self.get_chat(id)?.context("created chat missing")
+        ChatRepo::create_chat(&self.conn, id, card, title)
     }
 
     pub fn get_chat(&self, id: &str) -> Result<Option<ChatRecord>> {
-        self.conn
-            .query_row(
-                "SELECT id, card_name, title, created_at, updated_at FROM chats WHERE id = ?1",
-                [id],
-                |r| {
-                    Ok(ChatRecord {
-                        id: r.get(0)?,
-                        card: r.get(1)?,
-                        title: r.get(2)?,
-                        created_at: r.get(3)?,
-                        updated_at: r.get(4)?,
-                    })
-                },
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-            .context("get chat")
+        ChatRepo::get_chat(&self.conn, id)
     }
 
     pub fn list_chats(&self, card: Option<&str>) -> Result<Vec<ChatRecord>> {
-        let sql = if card.is_some() {
-            "SELECT id, card_name, title, created_at, updated_at FROM chats WHERE card_name = ?1 ORDER BY updated_at DESC"
-        } else {
-            "SELECT id, card_name, title, created_at, updated_at FROM chats ORDER BY updated_at DESC"
-        };
-        let mut stmt = self.conn.prepare(sql)?;
-        let make = |r: &rusqlite::Row<'_>| {
-            Ok(ChatRecord {
-                id: r.get(0)?,
-                card: r.get(1)?,
-                title: r.get(2)?,
-                created_at: r.get(3)?,
-                updated_at: r.get(4)?,
-            })
-        };
-        let rows = if let Some(card) = card {
-            stmt.query_map([card], make)?
-        } else {
-            stmt.query_map([], make)?
-        };
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        ChatRepo::list_chats(&self.conn, card)
     }
 
     pub fn rename_chat(&self, id: &str, title: &str) -> Result<usize> {
-        Ok(self.conn.execute(
-            "UPDATE chats SET title = ?2, updated_at = datetime('now','localtime') WHERE id = ?1",
-            rusqlite::params![id, title],
-        )?)
+        ChatRepo::rename_chat(&self.conn, id, title)
     }
 
     pub fn delete_chat(&self, id: &str) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute("DELETE FROM messages WHERE chat_id = ?1", [id])?;
-        let deleted = tx.execute("DELETE FROM chats WHERE id = ?1", [id])?;
-        tx.commit()?;
-        Ok(deleted)
+        ChatRepo::delete_chat(&self.conn, id)
     }
 
     pub fn add_chat_message(
@@ -298,31 +149,86 @@ impl MemoryStore {
         role: &str,
         content: &str,
     ) -> Result<()> {
-        let chat = self.get_chat(chat_id)?.context("chat not found")?;
-        anyhow::ensure!(chat.card == card, "chat belongs to a different card");
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![card, chat_id, role, content],
-        )
-        .context("insert chat message")?;
-        tx.execute(
-            "UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1",
-            [chat_id],
-        )?;
-        tx.commit()?;
-        Ok(())
+        ChatRepo::add_chat_message(&self.conn, chat_id, card, role, content)
     }
 
-    pub fn last_chat_message_id(&self, chat_id: &str) -> Result<i64> {
-        Ok(self.conn.query_row(
-            "SELECT COALESCE(MAX(id), 0) FROM messages WHERE chat_id = ?1",
-            [chat_id],
-            |r| r.get(0),
-        )?)
+    // ---------- Memory 表（委派给 MemoryRepo） ----------
+
+    pub fn add_memory(
+        &self,
+        card_name: &str,
+        summary: &str,
+        keywords: &str,
+        source_round: i64,
+    ) -> Result<i64> {
+        MemoryRepo::add_memory(&self.conn, card_name, summary, keywords, source_round)
     }
 
-    /// Commit a complete turn only if the conversation still matches the generation snapshot.
+    pub fn commit_memory_batch(
+        &self,
+        card_name: &str,
+        summary: &str,
+        upto_message_id: i64,
+    ) -> Result<bool> {
+        MemoryRepo::commit_memory_batch(&self.conn, card_name, summary, upto_message_id)
+    }
+
+    pub fn search(&self, card_name: &str, query: &str, limit: usize) -> Result<Vec<crate::types::MemoryHit>> {
+        MemoryRepo::search(&self.conn, card_name, query, limit)
+    }
+
+    pub fn count_memories(&self, card_name: &str) -> Result<usize> {
+        MemoryRepo::count_memories(&self.conn, card_name)
+    }
+
+    pub fn clear_memories(&self, card_name: &str) -> Result<usize> {
+        MemoryRepo::clear_memories(&self.conn, card_name)
+    }
+
+    pub fn list_memories(&self, card_name: &str, limit: usize) -> Result<Vec<crate::types::MemoryHit>> {
+        MemoryRepo::list_memories(&self.conn, card_name, limit)
+    }
+
+    // ---------- Settings 表（委派给 SettingsRepo） ----------
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        SettingsRepo::get_setting(&self.conn, key)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        SettingsRepo::set_setting(&self.conn, key, value)
+    }
+
+    // ---------- character_state 表（委派给 StateRepo） ----------
+
+    pub fn get_state(&self, card_key: &str) -> Result<Option<serde_json::Value>> {
+        StateRepo::get_state(&self.conn, card_key)
+    }
+
+    pub fn set_state(&self, card_key: &str, state: &serde_json::Value) -> Result<()> {
+        StateRepo::set_state(&self.conn, card_key, state)
+    }
+
+    // ---------- Lore 表（委派给 LoreRepo） ----------
+
+    pub fn replace_lore_entries(&self, card_name: &str, entries: &[crate::types::LoreEntry]) -> Result<()> {
+        LoreRepo::replace_lore_entries(&self.conn, card_name, entries)
+    }
+
+    pub fn trigger_lore_entries(&self, card_name: &str, history: &[Msg]) -> Result<Vec<crate::types::LoreEntry>> {
+        LoreRepo::trigger_lore_entries(&self.conn, card_name, history)
+    }
+
+    pub fn search_prompt_context(&self, card_name: &str, query: &str) -> Result<Vec<crate::types::PromptHit>> {
+        LoreRepo::search_prompt_context(&self.conn, card_name, query)
+    }
+
+    pub fn memory_block(&self, card_name: &str, query: &str, max_chars: usize) -> Result<Option<String>> {
+        LoreRepo::memory_block(&self.conn, card_name, query, max_chars)
+    }
+
+    // ---------- 跨表事务协调器 ----------
+
     pub fn commit_chat_turn(
         &self,
         chat_id: &str,
@@ -333,15 +239,15 @@ impl MemoryStore {
         regenerate: bool,
     ) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let chat = self.get_chat(chat_id)?.context("chat was deleted")?;
-        anyhow::ensure!(chat.card == card, "chat belongs to a different card");
-        anyhow::ensure!(
-            self.last_chat_message_id(chat_id)? == expected_last_id,
+        let chat = ChatRepo::get_chat(&tx, chat_id)?.context("chat was deleted")?;
+        ensure!(chat.card == card, "chat belongs to a different card");
+        ensure!(
+            MessageRepo::last_chat_message_id(&tx, chat_id)? == expected_last_id,
             "conversation changed during generation; please reload"
         );
         if regenerate {
-            let history = self.chat_history(chat_id, 2)?;
-            anyhow::ensure!(
+            let history = MessageRepo::chat_history(&tx, chat_id, 2)?;
+            ensure!(
                 history.len() == 2
                     && history[0].role == "user"
                     && history[0].content == user
@@ -369,11 +275,15 @@ impl MemoryStore {
             )?;
             tx.execute("DELETE FROM messages WHERE id = ?1", [expected_last_id])?;
         } else {
-            tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'user', ?3)",
-                rusqlite::params![card, chat_id, user])?;
+            tx.execute(
+                "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'user', ?3)",
+                rusqlite::params![card, chat_id, user],
+            )?;
         }
-        tx.execute("INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'assistant', ?3)",
-            rusqlite::params![card, chat_id, assistant])?;
+        tx.execute(
+            "INSERT INTO messages (card_name, chat_id, role, content) VALUES (?1, ?2, 'assistant', ?3)",
+            rusqlite::params![card, chat_id, assistant],
+        )?;
         tx.execute(
             "UPDATE chats SET updated_at = datetime('now','localtime') WHERE id = ?1",
             [chat_id],
@@ -382,285 +292,15 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn chat_history(&self, chat_id: &str, limit: usize) -> Result<Vec<Msg>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT role, content FROM (SELECT role, content, id FROM messages WHERE chat_id = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![chat_id, limit as i64], |r| {
-            Ok(Msg::new(r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn clear_chat_messages(&self, chat_id: &str) -> Result<usize> {
-        Ok(self
-            .conn
-            .execute("DELETE FROM messages WHERE chat_id = ?1", [chat_id])?)
-    }
-
-    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        self.conn
-            .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
-                [key],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-            .context("get setting")
-    }
-
-    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO app_settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now','localtime')",
-            rusqlite::params![key, value],
-        )?;
-        Ok(())
-    }
-
-    // ---------- 未处理游标：后台记忆提取用 ----------
-
-    pub fn count_unprocessed(&self, card_name: &str) -> Result<usize> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM messages WHERE card_name = ?1 AND processed = 0",
-                [card_name],
-                |r| r.get::<_, i64>(0),
-            )
-            .context("count unprocessed")? as usize)
-    }
-
-    pub fn unprocessed(&self, card_name: &str, limit: usize) -> Result<Vec<(i64, Msg)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, role, content FROM (
-                 SELECT id, role, content FROM messages
-                 WHERE card_name = ?1 AND processed = 0
-                 ORDER BY id ASC LIMIT ?2
-             ) ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![card_name, limit as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                Msg::new(r.get::<_, String>(1)?, r.get::<_, String>(2)?),
-            ))
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn mark_processed(&self, card_name: &str, upto_id: i64) -> Result<usize> {
-        self.conn
-            .execute(
-                "UPDATE messages SET processed = 1
-                 WHERE card_name = ?1 AND processed = 0 AND id <= ?2",
-                rusqlite::params![card_name, upto_id],
-            )
-            .context("mark processed")
-    }
-
-    pub fn list_memories(&self, card_name: &str, limit: usize) -> Result<Vec<MemoryHit>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, summary, keywords, source_round, created_at
-             FROM memories WHERE card_name = ?1 ORDER BY id DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![card_name, limit as i64], |r| {
-            Ok(MemoryHit {
-                id: r.get(0)?,
-                summary: r.get(1)?,
-                keywords: r.get(2)?,
-                source_round: r.get(3)?,
-                created_at: r.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    // ---------- 角色状态机 ----------
-
-    pub fn get_state(&self, card_key: &str) -> Result<Option<serde_json::Value>> {
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT state_json FROM character_state WHERE card_name = ?1",
-                [card_key],
-                |r| r.get(0),
-            )
-            .map(Some)
-            .or_else(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => Ok(None),
-                other => Err(other),
-            })
-            .context("get character_state")?;
-        match raw {
-            Some(s) => Ok(Some(
-                serde_json::from_str(&s).context("parse character_state json")?,
-            )),
-            None => Ok(None),
-        }
-    }
-
-    pub fn set_state(&self, card_key: &str, state: &serde_json::Value) -> Result<()> {
-        if !state.is_object() {
-            anyhow::bail!("character_state must be a JSON object");
-        }
-        let raw = serde_json::to_string(state).context("serialize state")?;
-        self.conn
-            .execute(
-                "INSERT INTO character_state (card_name, state_json, updated_at)
-                 VALUES (?1, ?2, datetime('now','localtime'))
-                 ON CONFLICT(card_name) DO UPDATE SET
-                     state_json = excluded.state_json,
-                     updated_at = excluded.updated_at",
-                rusqlite::params![card_key, raw],
-            )
-            .context("upsert character_state")?;
-        Ok(())
-    }
-
-    // ---------- Memory 表 + FTS5：记忆卡片 ----------
-
-    pub fn add_memory(
-        &self,
-        card_name: &str,
-        summary: &str,
-        keywords: &str,
-        source_round: i64,
-    ) -> Result<i64> {
-        if summary.trim().is_empty() {
-            anyhow::bail!("memory summary is empty");
-        }
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("begin memory insert transaction")?;
-        tx.execute(
-            "INSERT INTO memories (card_name, summary, keywords, source_round)
-                 VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![card_name, summary.trim(), keywords.trim(), source_round],
-        )
-        .context("insert memory")?;
-        let id = tx.last_insert_rowid();
-        let body = seg(&format!("{} {}", summary, keywords));
-        tx.execute(
-            "INSERT INTO memories_fts (mem_id, card_name, body) VALUES (?1, ?2, ?3)",
-            rusqlite::params![id, card_name, body],
-        )
-        .context("index memory (fts5)")?;
-        tx.commit().context("commit memory insert transaction")?;
-        Ok(id)
-    }
-
-    pub fn commit_memory_batch(
-        &self,
-        card_name: &str,
-        summary: &str,
-        upto_message_id: i64,
-    ) -> Result<bool> {
-        if summary.trim().is_empty() {
-            anyhow::bail!("memory summary is empty");
-        }
-
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("begin memory batch transaction")?;
-        let inserted = tx
-            .execute(
-                "INSERT INTO memories
-                    (card_name, summary, source_round, source_message_id)
-                 VALUES (?1, ?2, ?3, ?3)
-                 ON CONFLICT(card_name, source_message_id) DO NOTHING",
-                rusqlite::params![card_name, summary.trim(), upto_message_id],
-            )
-            .context("insert extracted memory")?;
-        if inserted > 0 {
-            let memory_id = tx.last_insert_rowid();
-            let body = seg(summary);
-            tx.execute(
-                "INSERT INTO memories_fts (mem_id, card_name, body) VALUES (?1, ?2, ?3)",
-                rusqlite::params![memory_id, card_name, body],
-            )
-            .context("index extracted memory")?;
-        }
-        tx.execute(
-            "UPDATE messages SET processed = 1
-             WHERE card_name = ?1 AND id <= ?2 AND processed = 0",
-            rusqlite::params![card_name, upto_message_id],
-        )
-        .context("advance memory extraction cursor")?;
-        tx.commit().context("commit memory batch transaction")?;
-        Ok(inserted > 0)
-    }
-
-    /// 关键词检索：jieba 分词 → FTS5 MATCH（OR）→ bm25 排序 Top-K。
-    pub fn search(&self, card_name: &str, query: &str, limit: usize) -> Result<Vec<MemoryHit>> {
-        let q = fts5_query(query);
-        if q.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut stmt = self.conn.prepare(
-            "SELECT m.id, m.summary, m.keywords, m.source_round, m.created_at
-             FROM memories_fts f
-             JOIN memories m ON m.id = f.mem_id
-             WHERE f.card_name = ?2 AND memories_fts MATCH ?1
-             ORDER BY bm25(memories_fts)
-             LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(rusqlite::params![q, card_name, limit as i64], |r| {
-            Ok(MemoryHit {
-                id: r.get(0)?,
-                summary: r.get(1)?,
-                keywords: r.get(2)?,
-                source_round: r.get(3)?,
-                created_at: r.get(4)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
-    }
-
-    pub fn count_memories(&self, card_name: &str) -> Result<usize> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE card_name = ?1",
-                [card_name],
-                |r| r.get::<_, i64>(0),
-            )
-            .context("count memories")? as usize)
-    }
-
-    pub fn clear_memories(&self, card_name: &str) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
-        let n = tx
-            .execute("DELETE FROM memories WHERE card_name = ?1", [card_name])
-            .context("clear memories")?;
-        tx.execute("DELETE FROM memories_fts WHERE card_name = ?1", [card_name])
-            .context("clear memories_fts")?;
-        tx.commit()?;
-        Ok(n)
-    }
-
     pub fn delete_card_data(&self, card_name: &str, legacy_name: Option<&str>) -> Result<()> {
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("begin card data deletion")?;
+        let tx = self.conn.unchecked_transaction()?;
         let legacy_name = legacy_name.unwrap_or(card_name);
         tx.execute(
-            "DELETE FROM memories_fts
-             WHERE mem_id IN (
-                 SELECT id FROM memories WHERE card_name IN (?1, ?2)
-             )",
+            "DELETE FROM memories_fts WHERE mem_id IN (SELECT id FROM memories WHERE card_name IN (?1, ?2))",
             rusqlite::params![card_name, legacy_name],
         )?;
         tx.execute(
-            "DELETE FROM lore_entries_fts
-             WHERE lore_id IN (
-                 SELECT id FROM lore_entries WHERE card_name IN (?1, ?2)
-             )",
+            "DELETE FROM lore_entries_fts WHERE lore_id IN (SELECT id FROM lore_entries WHERE card_name IN (?1, ?2))",
             rusqlite::params![card_name, legacy_name],
         )?;
         tx.execute(
@@ -683,230 +323,8 @@ impl MemoryStore {
             "DELETE FROM character_state WHERE card_name IN (?1, ?2)",
             rusqlite::params![card_name, legacy_name],
         )?;
-        tx.commit().context("commit card data deletion")?;
+        tx.commit()?;
         Ok(())
-    }
-
-    /// 记忆注入块：检索 Top-5 并渲染为「独立文本块」，拼进 System 与历史之间；
-    pub fn memory_block(
-        &self,
-        card_name: &str,
-        query: &str,
-        max_chars: usize,
-    ) -> Result<Option<String>> {
-        let hits = self.search(card_name, query, 5)?;
-        if hits.is_empty() {
-            return Ok(None);
-        }
-        let mut block =
-            String::from("[相关记忆]\n以下是从长期记忆中检索到的、与当前对话相关的事实：\n");
-        for h in &hits {
-            let line = format!("- {}\n", h.summary);
-            if block.chars().count() + line.chars().count() > max_chars {
-                break;
-            }
-            block.push_str(&line);
-        }
-        Ok(Some(block))
-    }
-
-    /// Replace a card's indexed lore atomically.
-    pub fn replace_lore_entries(&self, card_name: &str, entries: &[LoreEntry]) -> Result<()> {
-        let mut expected: Vec<_> = entries
-            .iter()
-            .filter(|e| !e.content.trim().is_empty())
-            .cloned()
-            .collect();
-        expected.sort_by(|a, b| a.source_key.cmp(&b.source_key));
-        let current = {
-            let mut stmt = self.conn.prepare(
-                "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
-                 FROM lore_entries WHERE card_name = ?1 ORDER BY source_key"
-            )?;
-            let rows = stmt.query_map([card_name], |r| {
-                Ok(LoreEntry {
-                    source_key: r.get(0)?,
-                    title: r.get(1)?,
-                    triggers: r.get(2)?,
-                    secondary_triggers: r.get(3)?,
-                    content: r.get(4)?,
-                    constant: r.get(5)?,
-                    enabled: r.get(6)?,
-                    selective: r.get(7)?,
-                    case_sensitive: r.get(8)?,
-                    match_whole_words: r.get(9)?,
-                    order: r.get(10)?,
-                    scan_depth: r.get(11)?,
-                })
-            })?;
-            rows.collect::<std::result::Result<Vec<_>, _>>()?
-        };
-        if current == expected {
-            return Ok(());
-        }
-        let tx = self
-            .conn
-            .unchecked_transaction()
-            .context("begin lore update")?;
-        tx.execute(
-            "DELETE FROM lore_entries_fts WHERE card_name = ?1",
-            [card_name],
-        )?;
-        tx.execute("DELETE FROM lore_entries WHERE card_name = ?1", [card_name])?;
-
-        for entry in entries
-            .iter()
-            .filter(|entry| !entry.content.trim().is_empty())
-        {
-            tx.execute(
-                "INSERT INTO lore_entries (card_name, source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                rusqlite::params![
-                    card_name,
-                    entry.source_key,
-                    entry.title,
-                    entry.triggers,
-                    entry.secondary_triggers,
-                    entry.content,
-                    entry.constant,
-                    entry.enabled,
-                    entry.selective,
-                    entry.case_sensitive,
-                    entry.match_whole_words,
-                    entry.order,
-                    entry.scan_depth,
-                ],
-            )?;
-            let id = tx.last_insert_rowid();
-            let body = seg(&format!(
-                "{} {} {} {}",
-                entry.title, entry.triggers, entry.secondary_triggers, entry.content
-            ));
-            tx.execute(
-                "INSERT INTO lore_entries_fts (lore_id, card_name, body) VALUES (?1, ?2, ?3)",
-                rusqlite::params![id, card_name, body],
-            )?;
-        }
-        tx.commit().context("commit lore update")
-    }
-
-    /// Search memories and lore separately with BM25, returning up to three from each source.
-    pub fn search_prompt_context(&self, card_name: &str, query: &str) -> Result<Vec<PromptHit>> {
-        let q = fts5_query(query);
-        let mut hits = Vec::new();
-
-        if !q.is_empty() {
-            let mut stmt = self.conn.prepare(
-                "SELECT m.summary, bm25(memories_fts)
-                 FROM memories_fts
-                 JOIN memories m ON m.id = memories_fts.mem_id
-                 WHERE memories_fts.card_name = ?2 AND memories_fts MATCH ?1
-                 ORDER BY bm25(memories_fts)
-                 LIMIT 3",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![q, card_name], |row| {
-                Ok(PromptHit {
-                    kind: "记忆",
-                    title: "长期记忆".to_string(),
-                    content: row.get(0)?,
-                    score: row.get(1)?,
-                })
-            })?;
-            hits.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
-
-            let mut stmt = self.conn.prepare(
-                "SELECT l.title, l.content, bm25(lore_entries_fts)
-                 FROM lore_entries_fts
-                 JOIN lore_entries l ON l.id = lore_entries_fts.lore_id
-                 WHERE lore_entries_fts.card_name = ?2 AND lore_entries_fts MATCH ?1
-                 ORDER BY bm25(lore_entries_fts)
-                 LIMIT 3",
-            )?;
-            let rows = stmt.query_map(rusqlite::params![q, card_name], |row| {
-                Ok(PromptHit {
-                    kind: "设定",
-                    title: row.get(0)?,
-                    content: row.get(1)?,
-                    score: row.get(2)?,
-                })
-            })?;
-            hits.extend(rows.collect::<std::result::Result<Vec<_>, _>>()?);
-        }
-
-        let mut stmt = self.conn.prepare(
-            "SELECT title, content
-             FROM lore_entries
-             WHERE card_name = ?1 AND constant = 1
-             ORDER BY id
-             LIMIT 3",
-        )?;
-        let rows = stmt.query_map([card_name], |row| {
-            Ok(PromptHit {
-                kind: "设定",
-                title: row.get(0)?,
-                content: row.get(1)?,
-                score: f64::NEG_INFINITY,
-            })
-        })?;
-        for constant in rows.collect::<std::result::Result<Vec<_>, _>>()? {
-            if let Some(existing) = hits.iter_mut().find(|hit| {
-                hit.kind == "设定" && hit.title == constant.title && hit.content == constant.content
-            }) {
-                existing.score = f64::NEG_INFINITY;
-            } else {
-                hits.push(constant);
-            }
-        }
-
-        hits.sort_by(|a, b| a.score.total_cmp(&b.score));
-        let mut memory_count = 0;
-        let mut lore_count = 0;
-        hits.retain(|hit| {
-            let count = if hit.kind == "记忆" {
-                &mut memory_count
-            } else {
-                &mut lore_count
-            };
-            if *count >= 3 {
-                return false;
-            }
-            *count += 1;
-            true
-        });
-        Ok(hits)
-    }
-
-    /// 世界书触发引擎：根据聊天历史匹配 lore_entries 的关键词触发条目。
-    pub fn trigger_lore_entries(&self, card_name: &str, history: &[Msg]) -> Result<Vec<LoreEntry>> {
-        let entries = self.load_lore_entries(card_name)?;
-        let history_text: Vec<String> = history.iter().map(|m| m.content.clone()).collect();
-        let triggered = activated_entries_internal(&entries, &history_text);
-        Ok(triggered)
-    }
-
-    /// 加载角色的所有世界书条目
-    fn load_lore_entries(&self, card_name: &str) -> Result<Vec<LoreEntry>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT source_key, title, triggers, secondary_triggers, content, constant, enabled, selective, case_sensitive, match_whole_words, order_val, scan_depth
-             FROM lore_entries WHERE card_name = ?1 AND enabled = 1 ORDER BY source_key"
-        )?;
-        let rows = stmt.query_map([card_name], |r| {
-            Ok(LoreEntry {
-                source_key: r.get(0)?,
-                title: r.get(1)?,
-                triggers: r.get(2)?,
-                secondary_triggers: r.get(3)?,
-                content: r.get(4)?,
-                constant: r.get(5)?,
-                enabled: r.get(6)?,
-                selective: r.get(7)?,
-                case_sensitive: r.get(8)?,
-                match_whole_words: r.get(9)?,
-                order: r.get(10)?,
-                scan_depth: r.get(11)?,
-            })
-        })?;
-        Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
     }
 }
 
@@ -1060,14 +478,8 @@ mod tests {
     }
 
     #[test]
-    fn schema_creates_fts5_tables() {
-        let s = MemoryStore::open_in_memory().unwrap();
-        assert!(s.count_memories("苏菲").unwrap() == 0);
-    }
-
-    #[test]
     fn seg_splits_chinese_and_drops_noise() {
-        let toks = seg("你喜欢什么呢？糖葫芦！");
+        let toks = crate::jieba::seg("你喜欢什么呢？糖葫芦！");
         assert!(toks.contains("糖葫芦"));
         assert!(toks.contains("喜欢"));
         assert!(!toks.contains("的"));
@@ -1076,7 +488,7 @@ mod tests {
 
     #[test]
     fn fts5_query_or_joins_quoted_tokens() {
-        let q = fts5_query("冬堡下雪");
+        let q = crate::jieba::fts5_query("冬堡下雪");
         assert!(q.contains('"'));
         assert!(q.contains(" OR "));
     }
