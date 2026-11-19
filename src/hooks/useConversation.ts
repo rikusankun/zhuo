@@ -2,14 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { api, isApiError, type Chat, type ChatInput, type Message, type RegexScript } from '../api/client';
 import { consumeChatStream } from '../api/sse';
 import { applyRegex } from '../lib/regex';
+import { useToast } from './useToast';
 
 export function useConversation(
   cardId: string,
   context: Pick<ChatInput, 'persona' | 'lore_entries'>,
   regexScripts: RegexScript[],
-  setError: (message: string) => void,
-  setNotice: (message: string) => void,
 ) {
+  const { addToast } = useToast();
   const [chats, setChats] = useState<Chat[]>([]);
   const [chatId, setChatId] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -35,12 +35,12 @@ export function useConversation(
     setLoading(Boolean(cardId));
     if (cardId) void api.chats.list(cardId).then(result => {
       if (!active) return;
-      if (isApiError(result)) throw new Error(result.error);
+      if (isApiError(result)) { addToast('error', result.error); return; }
       setChats(result); setChatId(result[0]?.id || '');
-    }).catch(e => { if (active) setError(String(e)); })
+    }).catch(e => { addToast('error', String(e)); })
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [cardId, setError]);
+  }, [cardId, addToast]);
 
   useEffect(() => {
     const version = ++historyVersion.current;
@@ -50,12 +50,12 @@ export function useConversation(
     setLoading(true);
     void api.history.get(chatId).then(result => {
       if (version !== historyVersion.current) return;
-      if (isApiError(result)) throw new Error(result.error);
+      if (isApiError(result)) { addToast('error', result.error); return; }
       setMessages(display(result));
-    }).catch(e => { if (version === historyVersion.current) setError(String(e)); })
+    }).catch(e => { if (version === historyVersion.current) addToast('error', String(e)); })
       .finally(() => { if (version === historyVersion.current) setLoading(false); });
     return () => { historyVersion.current++; };
-  }, [chatId, regexScripts, setError]);
+  }, [chatId, regexScripts, addToast]);
 
   useEffect(() => () => { abort.current?.abort(); }, []);
 
@@ -66,13 +66,12 @@ export function useConversation(
     setBusy(true);
     try {
       const result = await api.chats.create(current);
-      if (isApiError(result)) throw new Error(result.error);
+      if (isApiError(result)) { addToast('error', result.error); locked.current = false; setBusy(false); return; }
       if (selection.current.cardId !== current) return;
-      // Load through the history effect after releasing the synchronous lock.
       locked.current = false;
       setChats(rows => [result, ...rows]); setChatId(result.id);
-      setNotice('已创建新对话');
-    } catch (e) { setError(String(e)); }
+      addToast('success', '已创建新对话');
+    } catch (e) { addToast('error', String(e)); }
     finally { locked.current = false; setBusy(false); }
   }
 
@@ -81,13 +80,13 @@ export function useConversation(
     const current = cardId;
     try {
       const result = await api.chats.delete(id);
-      if (isApiError(result)) throw new Error(result.error);
-      if (!result.ok) throw new Error('对话不存在，请刷新');
+      if (isApiError(result)) { addToast('error', result.error); return; }
+      if (!result.ok) { addToast('error', '对话不存在，请刷新'); return; }
       if (selection.current.cardId !== current) return;
       const next = chats.filter(row => row.id !== id);
       setChats(next);
       if (selection.current.chatId === id) setChatId(next[0]?.id || '');
-    } catch (e) { setError(String(e)); }
+    } catch (e) { addToast('error', String(e)); }
   }
 
   async function renameChat() {
@@ -97,10 +96,10 @@ export function useConversation(
     if (!title) return;
     try {
       const result = await api.chats.rename(chat.id, title);
-      if (isApiError(result)) throw new Error(result.error);
-      if (!result.ok) throw new Error('对话不存在，请刷新');
+      if (isApiError(result)) { addToast('error', result.error); return; }
+      if (!result.ok) { addToast('error', '对话不存在，请刷新'); return; }
       setChats(rows => rows.map(row => row.id === chat.id ? { ...row, title } : row));
-    } catch (e) { setError(String(e)); }
+    } catch (e) { addToast('error', String(e)); }
   }
 
   async function send(override?: string, regenerate = false) {
@@ -108,7 +107,7 @@ export function useConversation(
     if (!text || !cardId || locked.current || loading) return;
     locked.current = true;
     historyVersion.current++;
-    setBusy(true); setError('');
+    setBusy(true);
     const controller = new AbortController();
     abort.current = controller;
     const currentCard = cardId;
@@ -119,18 +118,17 @@ export function useConversation(
     try {
       if (!active) {
         const result = await api.chats.create(currentCard);
-        if (isApiError(result)) throw new Error(result.error);
+        if (isApiError(result)) { addToast('error', result.error); return; }
         if (selection.current.cardId !== currentCard || controller.signal.aborted) return;
         active = result.id;
         selection.current.chatId = active;
         setChats(rows => [result, ...rows]); setChatId(active);
         const history = await api.history.get(active);
-        if (isApiError(history)) throw new Error(history.error);
+        if (isApiError(history)) { addToast('error', history.error); return; }
         previous = display(history);
       }
       if (!isCurrent() || controller.signal.aborted) return;
       if (!regenerate) setInput('');
-      setNotice('正在检索角色设定与长期记忆');
       setUsage(null); setPromptChars(null); setPromptTokens(null);
       setMessages(regenerate ? [...previous.slice(0, -1), { role: 'assistant', content: '' }]
         : [...previous, { role: 'user', content: text }, { role: 'assistant', content: '' }]);
@@ -153,11 +151,11 @@ export function useConversation(
         if (event.error) streamError = event.error;
       });
       if (streamError) throw new Error(streamError);
-      if (isCurrent()) setNotice('回复已保存');
+      if (isCurrent()) addToast('success', '回复已保存');
     } catch (e) {
       if (isCurrent()) {
-        if ((e as Error).name === 'AbortError') setNotice('已停止生成');
-        else setError(String(e));
+        if ((e as Error).name === 'AbortError') addToast('info', '已停止生成');
+        else addToast('error', String(e));
         if (!received) { setMessages(previous); if (!regenerate) setInput(text); }
       }
     } finally {

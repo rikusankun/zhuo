@@ -10,7 +10,6 @@ export type SettingsPanelProps = {
   setModelFilter: (v: string) => void;
   connectionStatus: 'idle' | 'testing' | 'ok' | 'error';
   modelsLoading: boolean;
-  modelsError: string;
   saved: boolean;
   normalizeBaseUrl: (url: string) => string;
   testConnection: () => Promise<void>;
@@ -53,7 +52,6 @@ export function SettingsPanel({
   setModelFilter,
   connectionStatus,
   modelsLoading,
-  modelsError,
   saved,
   normalizeBaseUrl,
   testConnection,
@@ -84,7 +82,6 @@ export function SettingsPanel({
         <button type="button" className="ghost" onClick={testConnection} disabled={connectionStatus === 'testing'}><RefreshCw size={14} /></button>
       </div>
       <button className="primary wide" onClick={refreshModels} disabled={modelsLoading}><RefreshCw size={16} />{modelsLoading ? '正在读取模型…' : '刷新本地模型列表'}</button>
-      {modelsError && <div className="status error">{modelsError}</div>}
       <input value={modelFilter} onChange={e => setModelFilter(e.target.value)} placeholder="搜索模型…" className="model-filter" />
       {connection.provider === 'openai' ? (
         <>
