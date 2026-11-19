@@ -25,6 +25,7 @@ export type Connection = {
   presence_penalty: number;
   repetition_penalty: number;
 };
+export type Model = { id: string; displayName: string };
 export type Lore = { id: string; keys: string; content: string; enabled: boolean };
 export type RegexScript = {
   script_name?: string;
