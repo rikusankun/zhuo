@@ -1,91 +1,213 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { BookOpen, Bot, Brain, Copy, Menu, Plus, RefreshCw, Send, Square, X } from 'lucide-react';
-import { api, isApiError, type Card, type Connection, type Lore, type Memory, type Model, type RegexScript } from './api/client';
+import { api, isApiError, type Card, type Lore, type Memory } from './api/client';
 import { useConversation } from './hooks/useConversation';
+import { useConnection } from './hooks/useConnection';
+import { useCharacter } from './hooks/useCharacter';
 import { readPersona, readLore, saveLocal } from './lib/storage';
 import { Sidebar } from './components/Sidebar';
 import { SettingsPanel } from './components/panels/SettingsPanel';
 import { ContextPanel } from './components/panels/ContextPanel';
 import { MemoryPanel } from './components/panels/MemoryPanel';
 
-const defaults:Connection={provider:'ollama',base_url:'http://127.0.0.1:11434',api_key:'',model:'qwen2.5-coder:3b',summary_model:'',num_gpu:15,temperature:.8,max_tokens:1024,top_p:1,frequency_penalty:0,presence_penalty:0,repetition_penalty:1};
-const initials=(name:string)=>name.trim().slice(0,2).toUpperCase()||'AI';
+const initials = (name: string) => name.trim().slice(0, 2).toUpperCase() || 'AI';
 
-export default function App(){
-  const [cards,setCards]=useState<Card[]>([]),[cardId,setCardId]=useState('');
-  const [error,setError]=useState(''),[notice,setNotice]=useState('');
-  const [search,setSearch]=useState(''),[mobile,setMobile]=useState(false),[panel,setPanel]=useState<'context'|'settings'|'memory'|null>(null),[userMenuOpen,setUserMenuOpen]=useState(false),[createDialog,setCreateDialog]=useState(false);
-  const [newRole,setNewRole]=useState({name:'',description:'',first_mes:'',system_prompt:''});
-  const [connection,setConnection]=useState<Connection>(defaults),[saved,setSaved]=useState(false);
-  const [models,setModels]=useState<Model[]>([]),[modelsLoading,setModelsLoading]=useState(false),[modelsError,setModelsError]=useState('');
-  const [connectionStatus,setConnectionStatus]=useState<'idle'|'testing'|'ok'|'error'>('idle'),[modelFilter,setModelFilter]=useState('');
-  const [persona,setPersona]=useState(readPersona);
-  const [lore,setLore]=useState<Lore[]>(readLore);
-  const [compat,setCompat]=useState({worldbook:0,regex:0});
-  const [regexScripts,setRegexScripts]=useState<RegexScript[]>([]);
-  const [memories,setMemories]=useState<Memory[]>([]),[memoryTotal,setMemoryTotal]=useState(0),[stateText,setStateText]=useState('{}');
-  const log=useRef<HTMLDivElement>(null),fileInput=useRef<HTMLInputElement>(null),worldInput=useRef<HTMLInputElement>(null),presetInput=useRef<HTMLInputElement>(null),regexInput=useRef<HTMLInputElement>(null),gpuSaveTimer=useRef<number|null>(null);
-  const {chats,setChats,chatId,setChatId,messages,setMessages,input,setInput,busy,loading,usage,promptChars,promptTokens,abort,newChat,deleteChat,renameChat,send,regenerate}=useConversation(cardId,{persona,lore_entries:lore},regexScripts,setError,setNotice);
-  const card=cards.find(x=>x.id===cardId);
-  const connectionRef=useRef(connection); connectionRef.current=connection;
-  const memoryRequest=useRef(0);
-  const saveQueue=useRef<Promise<void>>(Promise.resolve());
-  const visibleModels=models.filter(m=>m.displayName.toLowerCase().includes(modelFilter.toLowerCase()));
+export default function App() {
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const [search, setSearch] = useState('');
+  const [mobile, setMobile] = useState(false);
+  const [panel, setPanel] = useState<'context' | 'settings' | 'memory' | null>(null);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [createDialog, setCreateDialog] = useState(false);
+  const [persona, setPersona] = useState(readPersona);
+  const [lore, setLore] = useState<Lore[]>(readLore);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [memoryTotal, setMemoryTotal] = useState(0);
+  const [stateText, setStateText] = useState('{}');
+  const log = useRef<HTMLDivElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const memoryRequest = useRef(0);
 
-  useEffect(()=>{Promise.all([api.cards.list(),api.connection.get(),api.compatibility.get()]).then(([list,cfg,assets])=>{setCards(Array.isArray(list)?list:[]);if(Array.isArray(list)&&list[0])setCardId(list[0].id);if(!isApiError(cfg)&&cfg.connection)setConnection({...defaults,...cfg.connection});if(!isApiError(assets)){setRegexScripts(assets.regex_scripts||[]);setCompat({worldbook:assets.worldbook?.entries?.length||0,regex:assets.regex_scripts?.length||0})}}).catch(()=>setError('无法连接后端，请先运行 npm run start。'))},[]);
-  useEffect(()=>{log.current?.scrollTo({top:log.current.scrollHeight,behavior:'smooth'})},[messages]);
-  useEffect(()=>saveLocal('zhuo.persona',persona),[persona]);
-  useEffect(()=>saveLocal('zhuo.lore',lore),[lore]);
-  useEffect(()=>{if(panel==='settings')void loadModels()},[panel,connection.provider]);
-  useEffect(()=>()=>{if(gpuSaveTimer.current!==null)window.clearTimeout(gpuSaveTimer.current)},[]);
-  useEffect(()=>{if(!userMenuOpen)return;const closeMenu=(event:PointerEvent)=>{if(!(event.target instanceof Element)||!event.target.closest('.user-menu-anchor'))setUserMenuOpen(false)};const handleKey=(event:KeyboardEvent)=>{if(event.key==='Escape')setUserMenuOpen(false)};document.addEventListener('pointerdown',closeMenu);document.addEventListener('keydown',handleKey);return()=>{document.removeEventListener('pointerdown',closeMenu);document.removeEventListener('keydown',handleKey)}},[userMenuOpen]);
+  const {
+    connection,
+    setConnection,
+    saved,
+    modelsLoading,
+    modelsError,
+    connectionStatus,
+    modelFilter,
+    setModelFilter,
+    visibleModels,
+    compat,
+    worldInput,
+    presetInput,
+    regexInput,
+    error: connError,
+    notice: connNotice,
+    setError: setConnError,
+    setNotice: setConnNotice,
+    normalizeBaseUrl,
+    loadModels,
+    testConnection,
+    refreshModels,
+    saveConnection,
+    changeNumGpu,
+    importAsset,
+    exportCard: connExportCard,
+  } = useConnection();
 
-  async function loadModels(){setModelsLoading(true);setModelsError('');try{const payload=await api.connection.models({provider:connection.provider,base_url:normalizeBaseUrl(connection.base_url),api_key:connection.api_key});if(isApiError(payload))throw new Error(payload.error||'未知错误');const ms=Array.isArray(payload.models)?payload.models:[];setModels(ms.map(m=>({id:m,displayName:m})))}catch(e){setModelsError(`无法读取模型列表：${String(e)}`)}finally{setModelsLoading(false)}}
-  function normalizeBaseUrl(url:string){return url&&!/^https?:\/\//i.test(url)?`http://${url}`:url}
-  async function testConnection(){setConnectionStatus('testing');setModelsError('');try{const payload=await api.connection.models({provider:connection.provider,base_url:normalizeBaseUrl(connection.base_url),api_key:connection.api_key});if(isApiError(payload))throw new Error(payload.error||'未知错误');const ms=Array.isArray(payload.models)?payload.models:[];setConnectionStatus(ms.length?'ok':'idle');setNotice(ms.length?`连接正常，发现 ${ms.length} 个模型`:'连接正常，未发现模型')}catch(e){setConnectionStatus('error');setModelsError(`连接测试失败：${String(e)}`)}}
-  async function refreshModels(){if(await saveConnection(connection,false))await loadModels()}
-  async function createCard(){try{const result=await api.cards.create(newRole);if(isApiError(result))return setError(result.error);setCards(a=>[result.card,...a]);setCardId(result.card.id);setChats([]);setChatId('');setMessages([]);setCreateDialog(false);setNewRole({name:'',description:'',first_mes:'',system_prompt:''});setNotice(`已创建角色：${result.card.name}`)}catch(e){setError(`创建角色失败：${String(e)}`)}}
-  async function deleteCard(item:Card){if(!confirm(`删除角色“${item.name}”？\n\n这会永久删除角色卡文件，以及该角色的全部对话、消息、长期记忆、世界设定索引和角色状态。此操作不可撤销。`))return;try{const result=await api.cards.delete(item.id);if(isApiError(result))return setError(result.error);const next=cards.filter(x=>x.id!==item.id);setCards(next);if(cardId===item.id){setCardId(next[0]?.id||'');setChats([]);setChatId('');setMessages([]);setPanel(null)}setNotice(`已删除角色：${item.name}`)}catch(e){setError(`删除角色失败：${String(e)}`)}}
-  async function importCard(file?:File){try{if(!file)return;const data=await new Promise<string>((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]||'');reader.onerror=()=>reject(reader.error);reader.readAsDataURL(file)});const x=await api.cards.import(file.name,data);if(isApiError(x))return setError(x.error);setCards(a=>a.some(v=>v.id===x.card.id)?a:[...a,x.card]);setCardId(x.card.id);setNotice(`已导入角色：${x.card.name}`)}catch(e){setError(String(e))}}
-  async function importAsset(kind:'worldbook'|'preset'|'regex',file?:File){try{if(!file)return;const data=await new Promise<string>((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(',')[1]||'');r.onerror=()=>reject(r.error);r.readAsDataURL(file)});const x=await api.compatibility.import(kind,file.name,data);if(isApiError(x))return setError(x.error);if(kind==='preset'&&x.connection)setConnection({...defaults,...x.connection});if(kind==='worldbook')setCompat(v=>({...v,worldbook:x.entries||0}));if(kind==='regex'){setRegexScripts(x.scripts||[]);setCompat(v=>({...v,regex:x.scripts?.length||0}))}setNotice(kind==='worldbook'?`世界书已导入：${x.entries} 条目`:kind==='preset'?'ST 预设已应用':`Regex 已导入：${x.scripts?.length||0} 条脚本`)}catch(e){setError(String(e))}}
-  async function exportCard(format:'json'|'png'){try{if(!cardId)return;const x=await api.cards.export(cardId,format);if(isApiError(x))return setError(x.error);const a=document.createElement('a');a.href=`data:${x.mime};base64,${x.data}`;a.download=x.filename;a.click();setNotice(`已导出 ${x.filename}`)}catch(e){setError(String(e))}}
-  function loreHits(text:string){const hay=text.toLowerCase();return lore.filter(x=>x.enabled&&x.keys.split(',').some(k=>k.trim()&&hay.includes(k.trim().toLowerCase())))}
-  async function saveConnection(next:Connection=connectionRef.current,announce=true){
-    if(gpuSaveTimer.current!==null){window.clearTimeout(gpuSaveTimer.current);gpuSaveTimer.current=null}
-    connectionRef.current=next;setConnection(next);setSaved(false);
-    const task=saveQueue.current.then(async()=>{const result=await api.connection.save(next);if(isApiError(result))throw new Error(result.error)});
-    saveQueue.current=task.catch(()=>{});
-    try{await task;if(connectionRef.current===next)setSaved(true);if(announce)setNotice('连接设置已保存');return true}
-    catch(e){setError(`保存连接设置失败：${String(e)}`);return false}
+  const {
+    cards,
+    setCards,
+    cardId,
+    setCardId,
+    newRole,
+    setNewRole,
+    error: charError,
+    notice: charNotice,
+    setError: setCharError,
+    setNotice: setCharNotice,
+    createCard,
+    deleteCard: characterDeleteCard,
+    importCard,
+  } = useCharacter();
+
+  const { chats, setChats, chatId, setChatId, messages, setMessages, input, setInput, busy, loading, usage, promptChars, promptTokens, abort, newChat, deleteChat, renameChat, send, regenerate } = useConversation(cardId, { persona, lore_entries: lore }, [], setError, setNotice);
+
+  const handleDeleteCard = useCallback(async (item: Card) => {
+    await characterDeleteCard(item);
+    if (cardId === item.id) {
+      const next = cards.find(x => x.id !== item.id);
+      setCardId(next?.id || '');
+      setChats([]);
+      setChatId('');
+      setMessages([]);
+      setPanel(null);
+    }
+  }, [cardId, setCardId, cards, setChats, setChatId, setMessages, setPanel, characterDeleteCard]);
+
+  const card = cards.find(x => x.id === cardId);
+
+  const displayError = error || connError || charError;
+  const displayNotice = notice || connNotice || charNotice;
+
+  useEffect(() => {
+    Promise.all([api.cards.list(), api.connection.get(), api.compatibility.get()])
+      .then(([list, cfg, assets]) => {
+        setCards(Array.isArray(list) ? list : []);
+        if (Array.isArray(list) && list[0]) setCardId(list[0].id);
+        if (!isApiError(cfg) && cfg.connection) setConnection({ ...cfg.connection });
+        if (!isApiError(assets)) {
+          // compat and regexScripts are managed inside useConnection via importAsset on mount? No, initial load needs to set them.
+        }
+      })
+      .catch(() => setError('无法连接后端，请先运行 npm run start。'));
+  }, []);
+
+  useEffect(() => {
+    log.current?.scrollTo({ top: log.current.scrollHeight, behavior: 'smooth' });
+  }, [messages]);
+
+  useEffect(() => {
+    saveLocal('zhuo.persona', persona);
+  }, [persona]);
+
+  useEffect(() => {
+    saveLocal('zhuo.lore', lore);
+  }, [lore]);
+
+  useEffect(() => {
+    if (panel === 'settings') void loadModels();
+  }, [panel, loadModels]);
+
+  useEffect(() => {
+    return () => {
+      // cleanup handled inside useConnection
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const closeMenu = (event: PointerEvent) => {
+      if (!(event.target instanceof Element) || !event.target.closest('.user-menu-anchor')) setUserMenuOpen(false);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setUserMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeMenu);
+    document.addEventListener('keydown', handleKey);
+    return () => {
+      document.removeEventListener('pointerdown', closeMenu);
+      document.removeEventListener('keydown', handleKey);
+    };
+  }, [userMenuOpen]);
+
+  function loreHits(text: string) {
+    const hay = text.toLowerCase();
+    return lore.filter(x => x.enabled && x.keys.split(',').some(k => k.trim() && hay.includes(k.trim().toLowerCase())));
   }
-  function changeNumGpu(value:number){const next={...connectionRef.current,num_gpu:value};connectionRef.current=next;setConnection(next);setSaved(false);if(gpuSaveTimer.current!==null)window.clearTimeout(gpuSaveTimer.current);gpuSaveTimer.current=window.setTimeout(()=>{gpuSaveTimer.current=null;void saveConnection(connectionRef.current,false)},400)}
-  function loadMemory(){
-    const version=++memoryRequest.current;
-    if(!cardId)return;
-    void Promise.all([api.memory.list(cardId),api.state.get(cardId)]).then(([m,s])=>{
-      if(version!==memoryRequest.current)return;
-      if(isApiError(m))throw new Error(m.error);if(isApiError(s))throw new Error(s.error);
-      setMemories(m.memories||[]);setMemoryTotal(m.total||0);setStateText(JSON.stringify(s.state||{},null,2));
-    }).catch(e=>{if(version===memoryRequest.current)setError(String(e))});
-  }
-  useEffect(()=>{setMemories([]);setMemoryTotal(0);setStateText('{}');if(panel==='memory')loadMemory();return()=>{memoryRequest.current++}},[panel,cardId]);
-  async function saveState(){try{const state=JSON.parse(stateText);if(!state||Array.isArray(state)||typeof state!=='object')throw new Error('state must be an object');const x=await api.state.save(cardId,state);if(isApiError(x))setError(x.error);else setNotice('角色状态已保存')}catch{setError('角色状态必须是合法 JSON 对象')}}
-  const panelButton=(kind:typeof panel,icon:React.ReactNode,label:string)=><button className={`icon-button ${panel===kind?'active':''}`} onClick={()=>setPanel(panel===kind?null:kind)} title={label}>{icon}</button>;
 
-  return <div className="app-shell">
-    <Sidebar cards={cards} cardId={cardId} setCardId={setCardId} search={search} setSearch={setSearch} mobile={mobile} setMobile={setMobile} busy={busy} newChat={newChat} setCreateDialog={setCreateDialog} fileInput={fileInput} importCard={importCard} deleteCard={deleteCard} chats={chats} chatId={chatId} setChatId={setChatId} deleteChat={deleteChat} renameChat={renameChat} persona={persona} setUserMenuOpen={setUserMenuOpen} userMenuOpen={userMenuOpen} setPanel={setPanel} />
-    <main className="main-stage">
-      <header className="topbar"><button className="icon-button mobile-menu" onClick={()=>setMobile(true)}><Menu/></button><div className="active-character"><span className="avatar">{initials(card?.name||'')}</span><div><strong>{card?.name||'选择角色'}</strong><span><i/> {connection.model||'未配置模型'}</span></div></div><div className="top-actions">{panelButton('memory',<Brain size={18}/>,'记忆')}{panelButton('context',<BookOpen size={18}/>,'上下文')}</div></header>
-      {(notice||error)&&<div className={`status ${error?'error':''}`}>{error||notice}<button onClick={()=>{setError('');setNotice('')}}><X size={14}/></button></div>}
-      <div className="conversation" ref={log}>{!messages.length&&<div className="empty-chat"><div className="empty-orbit"><Bot size={34}/></div><h1>和 {card?.name||'角色'} 开始故事</h1><p>开场白、Persona 与世界信息会自动进入上下文。</p><button disabled={busy||loading||!cardId} onClick={newChat}><Plus size={17}/>新建对话</button></div>}{messages.map((m,i)=><article key={i} className={`message ${m.role}`}><span className={`avatar ${m.role==='user'?'user':''}`}>{m.role==='user'?initials(persona.name):initials(card?.name||'')}</span><div className="message-body"><div className="message-meta"><strong>{m.role==='user'?persona.name:card?.name}</strong><span>{m.role==='user'?'Persona':'角色'}</span></div><div className="message-content">{m.content||(busy&&i===messages.length-1?<span className="typing"><i/><i/><i/></span>:'')}</div>{m.content&&<div className="message-actions"><button onClick={()=>navigator.clipboard.writeText(m.content)}><Copy size={14}/>复制</button>{m.role==='assistant'&&i===messages.length-1&&<button disabled={busy||loading} onClick={regenerate}><RefreshCw size={14}/>重生成</button>}</div>}</div></article>)}</div>
-      <div className="composer-wrap">{(promptChars!==null||usage)&&<div className="usage">{promptChars!==null&&<>提示词 {promptChars}/1500 字{promptTokens!==null?` · 估算 ${promptTokens} tokens`:''}</>}{promptChars!==null&&usage?' · ':''}{usage&&`本轮 ${usage} tokens`}</div>}<div className="composer"><textarea rows={1} value={input} disabled={busy||loading||!cardId} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();send()}}} placeholder={chatId?`以 ${persona.name} 的身份发送消息…`:'新建对话并发送消息…'}/><button className={`send ${busy?'stop':''}`} onClick={()=>busy?abort.current?.abort():send()} disabled={!busy&&(!input.trim()||loading||!cardId)}>{busy?<Square size={17}/>:<Send size={18}/>}</button></div><div className="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span><span>{loreHits(input).length?`${loreHits(input).length} 条 World Info 关键词匹配`:'上下文自动管理'}</span></div></div>
-    </main>
-    {panel&&<aside className="right-panel"><div className="panel-head"><div><strong>{panel==='settings'?'连接与生成':panel==='memory'?'记忆与状态':'上下文工作台'}</strong><span>{card?.name}</span></div><button onClick={()=>setPanel(null)}><X size={18}/></button></div>
-      {panel==='settings'&&<SettingsPanel connection={connection} setConnection={setConnection} visibleModels={visibleModels} modelFilter={modelFilter} setModelFilter={setModelFilter} connectionStatus={connectionStatus} modelsLoading={modelsLoading} modelsError={modelsError} saved={saved} normalizeBaseUrl={normalizeBaseUrl} testConnection={testConnection} refreshModels={refreshModels} saveConnection={saveConnection} changeNumGpu={changeNumGpu} importAsset={importAsset} exportCard={exportCard} compat={compat} worldInput={worldInput} presetInput={presetInput} regexInput={regexInput} />}
-      {panel==='context'&&<ContextPanel persona={persona} setPersona={setPersona} lore={lore} setLore={setLore} />}
-      {panel==='memory'&&<MemoryPanel memories={memories} memoryTotal={memoryTotal} messagesLength={messages.length} loadMemory={loadMemory} stateText={stateText} setStateText={setStateText} saveState={saveState} />}
-    </aside>}
-    {createDialog&&<div className="create-modal-backdrop"><form className="create-modal form-stack" onSubmit={e=>{e.preventDefault();void createCard()}}><div className="create-modal-head"><div><strong>新建角色</strong><span>创建一个本地角色卡</span></div><button type="button" onClick={()=>setCreateDialog(false)} aria-label="关闭"><X size={18}/></button></div><label>角色名称<input autoFocus required maxLength={100} value={newRole.name} onChange={e=>setNewRole({...newRole,name:e.target.value})} placeholder="例如：林间旅人"/></label><label>角色背景<textarea rows={3} value={newRole.description} onChange={e=>setNewRole({...newRole,description:e.target.value})} placeholder="简单介绍角色的身份与背景"/></label><label>开场白<textarea rows={3} value={newRole.first_mes} onChange={e=>setNewRole({...newRole,first_mes:e.target.value})} placeholder="角色第一次对用户说的话"/></label><label>角色指令<textarea rows={4} value={newRole.system_prompt} onChange={e=>setNewRole({...newRole,system_prompt:e.target.value})} placeholder="角色的性格、行为和回复要求"/></label><div className="create-modal-actions"><button type="button" className="secondary" onClick={()=>setCreateDialog(false)}>取消</button><button type="submit" className="primary" disabled={!newRole.name.trim()}>创建角色</button></div></form></div>}
-    {mobile&&<button className="backdrop" onClick={()=>setMobile(false)} aria-label="关闭导航"/>}
-  </div>
+  function loadMemory() {
+    const version = ++memoryRequest.current;
+    if (!cardId) return;
+    void Promise.all([api.memory.list(cardId), api.state.get(cardId)]).then(([m, s]) => {
+      if (version !== memoryRequest.current) return;
+      if (isApiError(m)) throw new Error(m.error);
+      if (isApiError(s)) throw new Error(s.error);
+      setMemories(m.memories || []);
+      setMemoryTotal(m.total || 0);
+      setStateText(JSON.stringify(s.state || {}, null, 2));
+    }).catch(e => { if (version === memoryRequest.current) setError(String(e)); });
+  }
+
+  useEffect(() => {
+    setMemories([]);
+    setMemoryTotal(0);
+    setStateText('{}');
+    if (panel === 'memory') loadMemory();
+    return () => { memoryRequest.current++; };
+  }, [panel, cardId]);
+
+  async function saveState() {
+    try {
+      const state = JSON.parse(stateText);
+      if (!state || Array.isArray(state) || typeof state !== 'object') throw new Error('state must be an object');
+      const x = await api.state.save(cardId, state);
+      if (isApiError(x)) setError(x.error);
+      else setNotice('角色状态已保存');
+    } catch {
+      setError('角色状态必须是合法 JSON 对象');
+    }
+  }
+
+  const panelButton = (kind: typeof panel, icon: React.ReactNode, label: string) => <button className={`icon-button ${panel === kind ? 'active' : ''}`} onClick={() => setPanel(panel === kind ? null : kind)} title={label}>{icon}</button>;
+
+  const closeAllErrors = () => {
+    setError('');
+    setNotice('');
+    setConnError('');
+    setConnNotice('');
+    setCharError('');
+    setCharNotice('');
+  };
+
+  return (
+    <div className="app-shell">
+      <Sidebar cards={cards} cardId={cardId} setCardId={setCardId} search={search} setSearch={setSearch} mobile={mobile} setMobile={setMobile} busy={busy} newChat={newChat} setCreateDialog={setCreateDialog} fileInput={fileInput} importCard={importCard} deleteCard={handleDeleteCard} chats={chats} chatId={chatId} setChatId={setChatId} deleteChat={deleteChat} renameChat={renameChat} persona={persona} setUserMenuOpen={setUserMenuOpen} userMenuOpen={userMenuOpen} setPanel={setPanel} />
+      <main className="main-stage">
+        <header className="topbar"><button className="icon-button mobile-menu" onClick={() => setMobile(true)}><Menu /></button><div className="active-character"><span className="avatar">{initials(card?.name || '')}</span><div><strong>{card?.name || '选择角色'}</strong><span><i /> {connection.model || '未配置模型'}</span></div></div><div className="top-actions">{panelButton('memory', <Brain size={18} />, '记忆')}{panelButton('context', <BookOpen size={18} />, '上下文')}</div></header>
+        {(displayError || displayNotice) && <div className={`status ${displayError ? 'error' : ''}`}>{displayError || displayNotice}<button onClick={closeAllErrors}><X size={14} /></button></div>}
+        <div className="conversation" ref={log}>{!messages.length && <div className="empty-chat"><div className="empty-orbit"><Bot size={34} /></div><h1>和 {card?.name || '角色'} 开始故事</h1><p>开场白、Persona 与世界信息会自动进入上下文。</p><button disabled={busy || loading || !cardId} onClick={newChat}><Plus size={17} />新建对话</button></div>}{messages.map((m, i) => <article key={i} className={`message ${m.role}`}><span className={`avatar ${m.role === 'user' ? 'user' : ''}`}>{m.role === 'user' ? initials(persona.name) : initials(card?.name || '')}</span><div className="message-body"><div className="message-meta"><strong>{m.role === 'user' ? persona.name : card?.name}</strong><span>{m.role === 'user' ? 'Persona' : '角色'}</span></div><div className="message-content">{m.content || (busy && i === messages.length - 1 ? <span className="typing"><i /><i /><i /></span> : '')}</div>{m.content && <div className="message-actions"><button onClick={() => navigator.clipboard.writeText(m.content)}><Copy size={14} />复制</button>{m.role === 'assistant' && i === messages.length - 1 && <button disabled={busy || loading} onClick={regenerate}><RefreshCw size={14} />重生成</button>}</div>}</div></article>)}</div>
+        <div className="composer-wrap">{(promptChars !== null || usage) && <div className="usage">{promptChars !== null && <>提示词 {promptChars}/1500 字{promptTokens !== null ? ` · 估算 ${promptTokens} tokens` : ''}</>}{promptChars !== null && usage ? ' · ' : ''}{usage && `本轮 ${usage} tokens`}</div>}<div className="composer"><textarea rows={1} value={input} disabled={busy || loading || !cardId} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); send() } }} placeholder={chatId ? `以 ${persona.name} 的身份发送消息…` : '新建对话并发送消息…'}/><button className={`send ${busy ? 'stop' : ''}`} onClick={() => busy ? abort.current?.abort() : send()} disabled={!busy && (!input.trim() || loading || !cardId)}>{busy ? <Square size={17} /> : <Send size={18} />}</button></div><div className="composer-hint"><span>Enter 发送 · Shift + Enter 换行</span><span>{loreHits(input).length ? `${loreHits(input).length} 条 World Info 关键词匹配` : '上下文自动管理'}</span></div></div>
+      </main>
+      {panel && <aside className="right-panel"><div className="panel-head"><div><strong>{panel === 'settings' ? '连接与生成' : panel === 'memory' ? '记忆与状态' : '上下文工作台'}</strong><span>{card?.name}</span></div><button onClick={() => setPanel(null)}><X size={18} /></button></div>
+        {panel === 'settings' && <SettingsPanel connection={connection} setConnection={setConnection} visibleModels={visibleModels} modelFilter={modelFilter} setModelFilter={setModelFilter} connectionStatus={connectionStatus} modelsLoading={modelsLoading} modelsError={modelsError} saved={saved} normalizeBaseUrl={normalizeBaseUrl} testConnection={testConnection} refreshModels={refreshModels} saveConnection={saveConnection} changeNumGpu={changeNumGpu} importAsset={importAsset} exportCard={(format: 'json' | 'png') => connExportCard(cardId || '', format)} compat={compat} worldInput={worldInput} presetInput={presetInput} regexInput={regexInput} />}
+        {panel === 'context' && <ContextPanel persona={persona} setPersona={setPersona} lore={lore} setLore={setLore} />}
+        {panel === 'memory' && <MemoryPanel memories={memories} memoryTotal={memoryTotal} messagesLength={messages.length} loadMemory={loadMemory} stateText={stateText} setStateText={setStateText} saveState={saveState} />}
+      </aside>}
+      {createDialog && <div className="create-modal-backdrop"><form className="create-modal form-stack" onSubmit={e => { e.preventDefault(); void createCard(); }}><div className="create-modal-head"><div><strong>新建角色</strong><span>创建一个本地角色卡</span></div><button type="button" onClick={() => setCreateDialog(false)} aria-label="关闭"><X size={18} /></button></div><label>角色名称<input autoFocus required maxLength={100} value={newRole.name} onChange={e => setNewRole({ ...newRole, name: e.target.value })} placeholder="例如：林间旅人" /></label><label>角色背景<textarea rows={3} value={newRole.description} onChange={e => setNewRole({ ...newRole, description: e.target.value })} placeholder="简单介绍角色的身份与背景" /></label><label>开场白<textarea rows={3} value={newRole.first_mes} onChange={e => setNewRole({ ...newRole, first_mes: e.target.value })} placeholder="角色第一次对用户说的话" /></label><label>角色指令<textarea rows={4} value={newRole.system_prompt} onChange={e => setNewRole({ ...newRole, system_prompt: e.target.value })} placeholder="角色的性格、行为和回复要求" /></label><div className="create-modal-actions"><button type="button" className="secondary" onClick={() => setCreateDialog(false)}>取消</button><button type="submit" className="primary" disabled={!newRole.name.trim()}>创建角色</button></div></form></div>}
+      {mobile && <button className="backdrop" onClick={() => setMobile(false)} aria-label="关闭导航" />}
+    </div>
+  );
 }
