@@ -94,8 +94,8 @@ npm run start
 
 `npm run start` 会同时启动 Ollama 检查/服务、Rust 后端和 Vite 前端。首次运行 Rust 后端时，Cargo 会下载依赖并编译，耗时会比之后启动更长。保持该终端窗口运行，然后打开：
 
-- 前端：<http://localhost:3000>
-- 后端：<http://127.0.0.1:1127>
+- 前端：<http://localhost:3020>
+- 后端：<http://127.0.0.1:1120>
 
 退出时在启动终端按 `Ctrl+C`。
 
@@ -155,7 +155,7 @@ Copy-Item .env.example .env
 | `ZHUO_DB` | SQLite 数据库文件路径，默认项目根目录的 `zhuo.db` |
 | `ZHUO_CARDS_DIR` | 角色卡目录，默认 `examples` |
 | `ZHUO_WORLD` | 初始世界设定 JSON 路径，默认 `examples/world.json` |
-| `ZHUO_PORT` | Rust 后端监听端口，默认 `1127` |
+| `ZHUO_PORT` | Rust 后端监听端口，默认 `1120` |
 | `ZHUO_NO_USAGE` | 任意非空值会关闭流式响应中的 usage 统计请求 |
 | `OLLAMA_CONTEXT_LENGTH` | Ollama 服务启动时使用的上下文长度；示例默认 `4096` |
 | `OLLAMA_FLASH_ATTENTION` | Ollama 服务启动时是否启用 Flash Attention |
@@ -180,7 +180,7 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
-本地只运行前端时可使用 `npm run dev`；单独运行后端可使用 `npm run backend`。开发服务器默认在 `3000` 端口，后端默认在 `1127` 端口，前端会把 `/api` 请求代理给后端。Vite 会忽略 SQLite 数据库及 WAL/SHM 文件，避免数据库写入触发页面热更新。
+本地只运行前端时可使用 `npm run dev`；单独运行后端可使用 `npm run backend`。开发服务器默认在 `3020` 端口，后端默认在 `1120` 端口，前端会把 `/api` 请求代理给后端。Vite 会忽略 SQLite 数据库及 WAL/SHM 文件，避免数据库写入触发页面热更新。
 
 前端 HTTP 请求集中在 `src/api/client.ts`，React 组件只消费 API 方法和结果。后端 HTTP handler 留在 `routes` 模块；领域工作流逐步抽入 `services`，service 不依赖 Axum 的请求/响应类型，并返回可独立测试的结果。只在实际抽取领域逻辑时新增 service，避免纯转发包装层。
 
@@ -322,7 +322,7 @@ interface HookReturn<TData, TActions> {
 
 ### 页面提示后端连接失败
 
-确认 `npm run start` 的终端中 Rust 后端已启动并监听 `1127` 端口。停止旧的开发进程后重新运行 `npm run start`；Vite 的配置变更需要重启开发服务器后生效。
+确认 `npm run start` 的终端中 Rust 后端已启动并监听 `1120` 端口。停止旧的开发进程后重新运行 `npm run start`；Vite 的配置变更需要重启开发服务器后生效。
 
 ### 显存不足或模型加载失败
 

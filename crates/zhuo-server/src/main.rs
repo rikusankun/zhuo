@@ -7,7 +7,7 @@
 //!   ZHUO_CARDS_DIR  角色卡目录（默认 examples/）
 //!   ZHUO_WORLD      世界设定 JSON（默认 examples/world.json）
 //!   ZHUO_DB         SQLite 记忆库路径（默认 zhuo.db，蓝图低配轨）
-//!   ZHUO_PORT       监听端口（默认 1127）
+//!   ZHUO_PORT       监听端口（默认 1120）
 //!   ZHUO_NO_USAGE=1 不请求 stream_options.include_usage
 
 mod prompt;
@@ -31,7 +31,7 @@ use axum::routing::{get, post};
 use axum::{middleware, Router};
 
 /// 纯 Web 形态下允许的本机 Vite 前端来源。
-const ALLOWED_ORIGINS: [&str; 2] = ["http://localhost:3000", "http://127.0.0.1:3000"];
+const ALLOWED_ORIGINS: [&str; 2] = ["http://localhost:3020", "http://127.0.0.1:3020"];
 
 fn allowed_origin_header(origin: &str) -> Option<HeaderValue> {
     ALLOWED_ORIGINS
@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let port: u16 = std::env::var("ZHUO_PORT")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(1127);
+        .unwrap_or(1120);
     let connection = crate::config::connection_settings(&st);
 
     println!("酌 / zhuo-server");
@@ -168,9 +168,9 @@ mod tests {
 
     #[test]
     fn allows_only_local_vite_origins() {
-        assert!(allowed_origin_header("http://localhost:3000").is_some());
-        assert!(allowed_origin_header("http://127.0.0.1:3000").is_some());
-        assert!(allowed_origin_header("http://192.168.1.2:3000").is_none());
-        assert!(allowed_origin_header("https://localhost:3000").is_none());
+    assert!(allowed_origin_header("http://localhost:3020").is_some());
+    assert!(allowed_origin_header("http://127.0.0.1:3020").is_some());
+    assert!(allowed_origin_header("http://192.168.1.2:3020").is_none());
+    assert!(allowed_origin_header("https://localhost:3020").is_none());
     }
 }
