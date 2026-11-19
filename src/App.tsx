@@ -28,7 +28,7 @@ function AppContent() {
 
   // 所有 Hook 调用都在这里
   const { data: { connection, saved }, actions: { normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
-  const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
+  const { data: { connectionStatus, modelFilter, visibleModels, selectedModel }, actions: { setModelFilter, setSelectedModel, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
   const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
   const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setLore } } = useContext();
   const { data: { memories, memoryTotal, stateText }, actions: { setStateText, loadMemory, saveState } } = useMemory(cardId);
@@ -115,6 +115,7 @@ function AppContent() {
         <ChatComposer 
           input={input} setInput={setInput} busy={busy} loading={loading} 
           cardId={cardId} chatId={chatId} send={send} abort={abort} 
+          selectedModel={selectedModel} setSelectedModel={setSelectedModel} availableModels={visibleModels}
           promptChars={promptChars} promptTokens={promptTokens} usage={usage} 
           loreHits={contextLoreHits} 
         />

@@ -14,10 +14,12 @@ export type UseModelManagerData = {
   visibleModels: Model[];
   connectionStatus: 'idle' | 'testing' | 'ok' | 'error';
   modelFilter: string;
+  selectedModel: string;
 };
 
 export type UseModelManagerActions = {
   setModelFilter: (v: string) => void;
+  setSelectedModel: (v: string) => void;
   loadModels: () => Promise<void>;
   testConnection: () => Promise<void>;
   refreshModels: (saveFirst?: boolean) => Promise<void>;
@@ -29,6 +31,7 @@ export function useModelManager(input: UseModelManagerInput): HookReturn<UseMode
   const [loading, setLoading] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'ok' | 'error'>('idle');
   const [modelFilter, setModelFilter] = useState('');
+  const [selectedModel, setSelectedModel] = useState('');
   const [statusError, setStatusError] = useState<string | null>(null);
   const [statusSuccess, setStatusSuccess] = useState<string | null>(null);
 
@@ -103,10 +106,9 @@ export function useModelManager(input: UseModelManagerInput): HookReturn<UseMode
     }
     await loadModels();
   }, [loadModels]);
-
   return {
-    data: { models, visibleModels, connectionStatus, modelFilter },
-    actions: { setModelFilter, loadModels, testConnection, refreshModels },
+    data: { models, visibleModels, connectionStatus, modelFilter, selectedModel },
+    actions: { setModelFilter, setSelectedModel, loadModels, testConnection, refreshModels },
     status: {
       isLoading: loading,
       error: statusError,
