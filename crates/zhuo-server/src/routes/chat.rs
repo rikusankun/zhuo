@@ -200,7 +200,7 @@ pub async fn chat(State(st): State<ServerState>, Json(req): Json<ChatRequest>) -
             frequency_penalty: Some(connection.frequency_penalty),
             presence_penalty: Some(connection.presence_penalty),
             repetition_penalty: Some(connection.repetition_penalty),
-            num_gpu: (connection.provider == "ollama").then_some(connection.num_gpu),
+            num_gpu: (connection.provider == "ollama").then_some(connection.num_gpu).flatten(),
             ollama_native: native,
             stop: Some(&stop_strings),
         };

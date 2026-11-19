@@ -30,6 +30,7 @@ export function useAssetManager(input: UseAssetManagerInput): HookReturn<UseAsse
 
   // 启动时从后端加载已存的 regex_scripts，避免重启后 Regex 功能假死
   useEffect(() => {
+    if (!input.cardId) return;
     void api.compatibility.get().then(result => {
       if (isApiError(result)) return;
       const scripts = result.regex_scripts;
@@ -38,7 +39,7 @@ export function useAssetManager(input: UseAssetManagerInput): HookReturn<UseAsse
         setCompat(v => ({ ...v, regex: scripts.length }));
       }
     }).catch(() => {});
-  }, []);
+  }, [input.cardId]);
 
   const importAsset = useCallback(async (kind: 'worldbook' | 'preset' | 'regex', file?: File) => {
     if (!file) return;

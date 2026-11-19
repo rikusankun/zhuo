@@ -191,6 +191,9 @@ pub async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<St
 }
 
 pub async fn fetch_models(provider: &str, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
+    if provider.is_empty() {
+        return Err("尚未选择服务类型".into());
+    }
     match provider {
         "ollama" => fetch_ollama_models(base_url).await,
         _ => fetch_openai_models(base_url, api_key).await,

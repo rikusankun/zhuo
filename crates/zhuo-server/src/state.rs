@@ -266,7 +266,7 @@ mod tests {
         let connection = crate::config::connection_settings(&state);
         assert_eq!(connection.model, "selected-main");
         assert_eq!(connection.summary_model, "selected-summary");
-        assert_eq!(connection.num_gpu, 27);
+        assert_eq!(connection.num_gpu, Some(27));
         assert!(state.summary_enabled());
     }
 

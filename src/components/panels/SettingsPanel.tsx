@@ -14,7 +14,7 @@ export type SettingsPanelProps = {
   testConnection: () => Promise<void>;
   refreshModels: () => Promise<void>;
   saveConnection: (next?: Connection, announce?: boolean) => Promise<boolean>;
-  changeNumGpu: (v: number) => void;
+  changeNumGpu: (v: number | null) => void;
   importAsset: (kind: 'worldbook' | 'preset' | 'regex', file?: File) => Promise<void>;
   exportCard: (format: 'json' | 'png') => Promise<void>;
   compat: { worldbook: number; regex: number };
@@ -69,17 +69,18 @@ export function SettingsPanel({
       <label>
         服务类型
         <select value={connection.provider} onChange={e => setConnection({ ...connection, provider: e.target.value })}>
+          <option value="">请选择服务类型</option>
           <option value="ollama">Ollama</option>
           <option value="openai">OpenAI Compatible</option>
         </select>
       </label>
-      <Field label="Base URL" value={connection.base_url} set={v => setConnection({ ...connection, base_url: v })} onBlur={v => setConnection({ ...connection, base_url: normalizeBaseUrl(v) })} />
-      <Field label="API Key" value={connection.api_key} set={v => setConnection({ ...connection, api_key: v })} password />
+      <Field label="Base URL" value={connection.base_url ?? ''} set={v => setConnection({ ...connection, base_url: v })} onBlur={v => setConnection({ ...connection, base_url: normalizeBaseUrl(v) })} />
+      <Field label="API Key" value={connection.api_key ?? ''} set={v => setConnection({ ...connection, api_key: v })} password />
       <div className="connection-bar">
         <span className={`dot ${connectionStatus}`}>{connectionStatus === 'idle' ? '未测试' : connectionStatus === 'testing' ? '测试中…' : connectionStatus === 'ok' ? '连接正常' : '连接失败'}</span>
         <button type="button" className="ghost" onClick={testConnection} disabled={connectionStatus === 'testing'}><RefreshCw size={14} /></button>
       </div>
-      <button className="primary wide" onClick={refreshModels} disabled={modelsLoading}><RefreshCw size={16} />{modelsLoading ? '正在读取模型…' : '刷新本地模型列表'}</button>
+      <button className="primary wide" onClick={refreshModels} disabled={modelsLoading || !connection.base_url || !connection.provider}><RefreshCw size={16} />{modelsLoading ? '正在读取模型…' : '刷新本地模型列表'}</button>
       <input value={modelFilter} onChange={e => setModelFilter(e.target.value)} placeholder="搜索模型…" className="model-filter" />
       {connection.provider === 'openai' ? (
         <>
@@ -107,8 +108,9 @@ export function SettingsPanel({
       )}
       <label>
         显存分配层数（num_gpu）
-        <b>{connection.num_gpu}</b>
-        <input type="range" min="0" max="99" step="1" value={connection.num_gpu} onChange={e => changeNumGpu(Number(e.target.value))} />
+        <b>{connection.num_gpu === null ? '自动' : String(connection.num_gpu)}</b>
+        <input type="range" min="0" max="99" step="1" value={connection.num_gpu ?? 0} onChange={e => changeNumGpu(Number(e.target.value))} disabled={connection.num_gpu === null} />
+        <button type="button" onClick={() => changeNumGpu(null)} disabled={connection.num_gpu !== null} style={{ marginLeft: '6px', fontSize: '11px' }}>自动</button>
       </label>
       <small className="settings-help">6GB 显卡建议 15 层；12GB 以上可尝试 99 层。后台提取模型固定使用 CPU。</small>
       <div style={{ fontWeight: 'bold', fontSize: '14px', marginTop: '12px', marginBottom: '8px' }}>生成参数</div>

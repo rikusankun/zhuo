@@ -109,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     }
     println!(
         "  GPU 分流     : 主模型 num_gpu={} / 提取模型 num_gpu=0（强制 CPU）",
-        connection.num_gpu
+        connection.num_gpu.map_or_else(|| "自动".to_string(), |n| n.to_string())
     );
     if configured {
         println!(

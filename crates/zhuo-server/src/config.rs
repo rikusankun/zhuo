@@ -16,8 +16,8 @@ pub struct ConnectionSettings {
     pub model: String,
     #[serde(default)]
     pub summary_model: String,
-    #[serde(default = "default_num_gpu")]
-    pub num_gpu: i64,
+    #[serde(default)]
+    pub num_gpu: Option<i64>,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default = "default_max_tokens")]
@@ -46,9 +46,6 @@ fn default_top_p() -> f32 {
 }
 fn default_repetition_penalty() -> f32 {
     0.0
-}
-fn default_num_gpu() -> i64 {
-    0
 }
 
 pub fn ollama_root(base_url: &str) -> String {
@@ -82,7 +79,7 @@ pub fn connection_settings(st: &ServerState) -> ConnectionSettings {
         api_key: String::new(),
         model: String::new(),
         summary_model: String::new(),
-        num_gpu: 0,
+        num_gpu: None,
         temperature: 0.0,
         max_tokens: 0,
         top_p: 0.0,
@@ -102,7 +99,7 @@ pub fn connection_settings(st: &ServerState) -> ConnectionSettings {
             cfg.model = saved.model;
         }
         cfg.summary_model = saved.summary_model;
-        cfg.num_gpu = saved.num_gpu.clamp(0, 99);
+        cfg.num_gpu = saved.num_gpu;
         if !st.env_api_key && !saved.api_key.trim().is_empty() && saved.api_key != "••••••••" {
             cfg.api_key = saved.api_key;
         }

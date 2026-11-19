@@ -17,7 +17,7 @@ export type Connection = {
   api_key: string;
   model: string;
   summary_model: string;
-  num_gpu: number;
+  num_gpu: number | null;
   temperature: number;
   max_tokens: number;
   top_p: number;

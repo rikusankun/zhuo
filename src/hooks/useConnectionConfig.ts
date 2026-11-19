@@ -9,7 +9,7 @@ const defaults: Connection = {
   api_key: '',
   model: '',
   summary_model: '',
-  num_gpu: 0,
+  num_gpu: null,
   temperature: 0.0,
   max_tokens: 0,
   top_p: 0.0,
@@ -26,7 +26,7 @@ export type UseConnectionConfigData = {
 export type UseConnectionConfigActions = {
   setConnection: (c: Connection) => void;
   saveConnection: (next?: Connection, announce?: boolean) => Promise<boolean>;
-  changeNumGpu: (value: number) => void;
+  changeNumGpu: (value: number | null) => void;
   normalizeBaseUrl: (url: string) => string;
 };
 
@@ -85,7 +85,7 @@ export function useConnectionConfig(): HookReturn<UseConnectionConfigData, UseCo
     }
   }, [addToast]);
 
-  const changeNumGpu = useCallback((value: number) => {
+  const changeNumGpu = useCallback((value: number | null) => {
     const next = { ...connectionRef.current, num_gpu: value };
     connectionRef.current = next;
     setConnection(next);

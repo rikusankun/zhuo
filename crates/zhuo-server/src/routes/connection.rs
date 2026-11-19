@@ -71,7 +71,9 @@ pub async fn set_connection(
     cfg.frequency_penalty = cfg.frequency_penalty.clamp(-2.0, 2.0);
     cfg.presence_penalty = cfg.presence_penalty.clamp(-2.0, 2.0);
     cfg.repetition_penalty = cfg.repetition_penalty.clamp(0.0, 2.0);
-    cfg.num_gpu = cfg.num_gpu.clamp(0, 99);
+    if let Some(gpu) = cfg.num_gpu {
+        cfg.num_gpu = Some(gpu.clamp(0, 99));
+    }
     let raw = serde_json::to_string(&cfg).unwrap_or_default();
     let mem = st.memory.lock().unwrap_or_else(|e| e.into_inner());
     match mem.set_setting("connection", &raw) {
