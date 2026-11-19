@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Brain, Menu, X } from 'lucide-react';
-import { api, isApiError, type Card } from './api/client';
+import { api, type Card } from './api/client';
 // 注意：这里只导入 Hook，不要在这里调用
 import { 
   useConversation, useConnectionConfig, useModelManager, 
@@ -27,7 +27,7 @@ function AppContent() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   // 所有 Hook 调用都在这里
-  const { data: { connection, saved }, actions: { setConnection, normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
+  const { data: { connection, saved }, actions: { normalizeBaseUrl, saveConnection, changeNumGpu } } = useConnectionConfig();
   const { data: { connectionStatus, modelFilter, visibleModels }, actions: { setModelFilter, testConnection, refreshModels }, status: { isLoading: modelsLoading } } = useModelManager(connection);
   const { data: { cards, cardId, newRole }, actions: { setCards, setCardId, setNewRole, createCard, deleteCard: characterDeleteCard, importCard } } = useCharacter();
   const { data: { persona, lore, loreHits: contextLoreHits }, actions: { setLore } } = useContext();
@@ -51,11 +51,10 @@ function AppContent() {
   const closeToast = (id: string) => removeToast(id);
 
   useEffect(() => { 
-    Promise.all([api.cards.list(), api.connection.get(), api.compatibility.get()])
-      .then(([list, cfg]) => { 
+    Promise.all([api.cards.list(), api.compatibility.get()])
+      .then(([list]) => { 
         setCards(Array.isArray(list) ? list : []); 
         if (Array.isArray(list) && list[0]) setCardId(list[0].id); 
-        if (!isApiError(cfg) && cfg.connection) setConnection({ ...cfg.connection }); 
       })
       .catch(() => addToast('error', '无法连接后端，请先运行 npm run start。')); 
   }, []);
