@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, isApiError, type Connection } from '../api/client';
 import { useToast } from './useToast';
+import type { HookReturn } from './types';
 
 const defaults: Connection = {
   provider: 'ollama',
@@ -17,10 +18,25 @@ const defaults: Connection = {
   repetition_penalty: 1.0,
 };
 
-export function useConnectionConfig() {
+export type UseConnectionConfigData = {
+  connection: Connection;
+  saved: boolean;
+};
+
+export type UseConnectionConfigActions = {
+  setConnection: (c: Connection) => void;
+  saveConnection: (next?: Connection, announce?: boolean) => Promise<boolean>;
+  changeNumGpu: (value: number) => void;
+  normalizeBaseUrl: (url: string) => string;
+};
+
+export function useConnectionConfig(): HookReturn<UseConnectionConfigData, UseConnectionConfigActions> {
   const { addToast } = useToast();
   const [connection, setConnection] = useState<Connection>(defaults);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saveSuccess, setSaveSuccess] = useState<string | null>(null);
 
   const connectionRef = useRef(connection);
   connectionRef.current = connection;
@@ -41,6 +57,9 @@ export function useConnectionConfig() {
     connectionRef.current = target;
     setConnection(target);
     setSaved(false);
+    setSaving(true);
+    setSaveError(null);
+    setSaveSuccess(null);
 
     const task = saveQueue.current.then(async () => {
       const result = await api.connection.save(target);
@@ -51,11 +70,18 @@ export function useConnectionConfig() {
     try {
       await task;
       if (connectionRef.current === target) setSaved(true);
-      if (announce) addToast('success', '连接设置已保存');
+      if (announce) {
+        setSaveSuccess('连接设置已保存');
+        addToast('success', '连接设置已保存');
+      }
       return true;
     } catch (e) {
-      addToast('error', `保存连接设置失败：${String(e)}`);
+      const msg = `保存连接设置失败：${String(e)}`;
+      setSaveError(msg);
+      addToast('error', msg);
       return false;
+    } finally {
+      setSaving(false);
     }
   }, [addToast]);
 
@@ -82,11 +108,12 @@ export function useConnectionConfig() {
   }, []);
 
   return {
-    connection,
-    setConnection,
-    saved,
-    normalizeBaseUrl,
-    saveConnection,
-    changeNumGpu,
+    data: { connection, saved },
+    actions: { setConnection, saveConnection, changeNumGpu, normalizeBaseUrl },
+    status: {
+      isLoading: saving,
+      error: saveError,
+      success: saveSuccess,
+    },
   };
 }
