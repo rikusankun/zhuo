@@ -15,6 +15,12 @@ mod config;
 mod routes;
 pub mod services;
 mod state;
+mod history_formatter;
+mod lore_injector;
+mod system_prompt;
+
+#[cfg(test)]
+mod prompt_tests;
 
 use axum::body::Body;
 use axum::extract::Request;
