@@ -118,13 +118,38 @@ pub struct SetStateRequest {
 
 pub const DEFAULT_USER_NAME: &str = "旅人";
 
+fn extract_model_names(payload: &Value) -> Vec<String> {
+    let arr = payload
+        .get("data")
+        .or_else(|| payload.get("数据"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    arr.into_iter()
+        .filter_map(|m| {
+            m.get("id")
+                .or_else(|| m.get("ID"))
+                .or_else(|| m.get("name"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .collect()
+}
+
 fn ollama_model_names(payload: &Value) -> Vec<String> {
     payload
         .get("models")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|model| model.get("name").and_then(Value::as_str))
+        .filter_map(|model| {
+            model
+                .get("name")
+                .or_else(|| model.get("ID"))
+                .or_else(|| model.get("id"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_string)
         .collect()
 }
@@ -164,12 +189,15 @@ pub async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<St
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("create OpenAI client: {e}"))?;
-    let response = client
-        .get(url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .send()
-        .await
-        .map_err(|e| format!("OpenAI models request failed: {e}"))?;
+    let response = {
+        let mut req = client.get(url);
+        if !api_key.is_empty() {
+            req = req.header("Authorization", format!("Bearer {api_key}"));
+        }
+        req.send()
+            .await
+            .map_err(|e| format!("OpenAI models request failed: {e}"))?
+    };
     if !response.status().is_success() {
         let status = response.status();
         let detail = match response.text().await {
@@ -182,14 +210,7 @@ pub async fn fetch_openai_models(base_url: &str, api_key: &str) -> Result<Vec<St
         .json()
         .await
         .map_err(|e| format!("parse OpenAI models response: {e}"))?;
-    Ok(payload
-        .get("data")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|m| m.get("id").and_then(Value::as_str))
-        .map(str::to_string)
-        .collect())
+    Ok(extract_model_names(&payload))
 }
 
 pub async fn fetch_models(provider: &str, base_url: &str, api_key: &str) -> Result<Vec<String>, String> {
