@@ -9,6 +9,11 @@ use zhuo_llm::Msg;
 
 pub struct OpenAiProvider;
 
+/// 去掉 base_url 末尾可能已有的 /v1，避免拼接时重复
+fn strip_v1(base: &str) -> String {
+    base.trim_end_matches('/').strip_suffix("/v1").unwrap_or(base.trim_end_matches('/')).to_string()
+}
+
 #[async_trait]
 impl ChatProvider for OpenAiProvider {
     fn provider_type(&self) -> ProviderType {
@@ -16,7 +21,7 @@ impl ChatProvider for OpenAiProvider {
     }
 
     fn chat_url(&self, connection: &ConnectionSettings, model: &str) -> String {
-        let base = connection.base_url.trim_end_matches('/');
+        let base = strip_v1(&connection.base_url);
         if connection.provider == "ollama" {
             format!("{}/api/chat", base)
         } else {
@@ -78,7 +83,7 @@ impl ChatProvider for OpenAiProvider {
                 crate::config::ollama_root(&connection.base_url)
             )
         } else {
-            format!("{}/v1/models", connection.base_url.trim_end_matches('/'))
+            format!("{}/v1/models", strip_v1(&connection.base_url))
         }
     }
 
