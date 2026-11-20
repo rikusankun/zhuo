@@ -130,8 +130,8 @@ export function SettingsPanel({
       <label>
         显存分配层数（num_gpu）
         <b>{connection.num_gpu === null ? '自动（推荐）' : String(connection.num_gpu)}</b>
-        <input type="range" min="0" max="99" step="1" value={connection.num_gpu ?? 0} onChange={e => changeNumGpu(Number(e.target.value))} disabled={connection.num_gpu === null} />
-        <button type="button" onClick={() => changeNumGpu(null)} disabled={connection.num_gpu !== null} style={{ marginLeft: '6px', fontSize: '11px' }}>自动</button>
+        <input type="range" min="0" max="99" step="1" value={connection.num_gpu ?? 0} onChange={e => changeNumGpu(Number(e.target.value))} />
+        <button type="button" onClick={() => changeNumGpu(null)} disabled={connection.num_gpu === null} style={{ marginLeft: '6px', fontSize: '11px' }}>自动</button>
       </label>
       <small className="settings-help">6GB 显卡建议 15 层；12GB 以上可尝试 99 层。后台提取模型固定使用 CPU。</small>
       <div style={{ fontWeight: 'bold', fontSize: '14px', marginTop: '12px', marginBottom: '8px' }}>生成参数</div>
