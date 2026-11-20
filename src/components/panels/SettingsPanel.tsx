@@ -22,7 +22,7 @@ export type SettingsPanelProps = {
 };
 
 const PROVIDERS: { id: string; name: string; baseUrl: string | null; defaultModel: string }[] = [
-  { id: 'ollama', name: 'Ollama（本地）', baseUrl: null, defaultModel: '' },
+  { id: 'ollama', name: 'Ollama（本地）', baseUrl: 'http://127.0.0.1:11434', defaultModel: '' },
   { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', defaultModel: 'gpt-4o' },
   { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022' },
   { id: 'google', name: 'Google', baseUrl: 'https://generativelanguage.googleapis.com/v1', defaultModel: 'gemini-1.5-pro' },
