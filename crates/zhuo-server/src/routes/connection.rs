@@ -45,7 +45,7 @@ pub async fn set_connection(
     }
     const ALLOWED_PROVIDERS: &[&str] = &[
         "ollama", "openai", "openai_compatible", "anthropic", "google",
-        "openrouter", "azure", "deepseek", "moonshot", "baidu", "aliyun", "tencent", "custom"
+        "openrouter", "demonroute", "azure", "deepseek", "moonshot", "baidu", "aliyun", "tencent", "custom"
     ];
     if !ALLOWED_PROVIDERS.contains(&cfg.provider.as_str()) {
         return Json(json!({"error":"不支持的服务类型"}));
