@@ -1,9 +1,10 @@
 import React from 'react';
 import { BookOpen, Check, Database, RefreshCw, Settings, SlidersHorizontal, Sparkles } from 'lucide-react';
 import type { Connection, Model } from '../../api/client';
-import { useConnection } from '../../hooks/useConnectionContext';
 
 export type SettingsPanelProps = {
+  connection: Connection;
+  setConnection: (c: Connection) => void;
   visibleModels: Model[];
   modelFilter: string;
   setModelFilter: (v: string) => void;
@@ -58,6 +59,8 @@ function Field({ label, value, set, password = false, onBlur }: { label: string;
 }
 
 export function SettingsPanel({
+  connection,
+  setConnection,
   visibleModels,
   modelFilter,
   setModelFilter,
@@ -73,7 +76,6 @@ export function SettingsPanel({
   exportCard,
   compat,
 }: SettingsPanelProps) {
-  const { connection, setConnection } = useConnection();
   const worldInput = React.useRef<HTMLInputElement>(null);
   const presetInput = React.useRef<HTMLInputElement>(null);
   const regexInput = React.useRef<HTMLInputElement>(null);

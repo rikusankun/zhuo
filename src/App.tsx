@@ -133,6 +133,7 @@ function AppContent() {
           
           {panel === 'settings' && (
             <SettingsPanel 
+              connection={connection} setConnection={saveConnection}
               visibleModels={visibleModels} modelFilter={modelFilter} setModelFilter={setModelFilter} 
               connectionStatus={connectionStatus} modelsLoading={modelsLoading} saved={saved} 
               normalizeBaseUrl={normalizeBaseUrl} testConnection={testConnection} 
