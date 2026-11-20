@@ -24,7 +24,7 @@ export type UseConversationActions = {
   deleteChat: (id: string) => Promise<void>;
   renameChat: () => Promise<void>;
   selectChat: (id: string) => void;
-  send: (override?: string, regenerate?: boolean) => Promise<void>;
+  send: (override?: string, regenerate?: boolean, model?: string) => Promise<void>;
   regenerate: () => void;
 };
 
