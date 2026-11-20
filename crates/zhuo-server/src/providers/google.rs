@@ -78,6 +78,12 @@ impl ChatProvider for GoogleProvider {
             generation_config["topP"] = Value::from(top_p);
         }
 
+        if let Some(stop) = _stop {
+            if !stop.is_empty() {
+                generation_config["stopSequences"] = serde_json::to_value(stop).unwrap_or(Value::Null);
+            }
+        }
+
         let mut body = serde_json::json!({
             "contents": contents,
             "generationConfig": generation_config,

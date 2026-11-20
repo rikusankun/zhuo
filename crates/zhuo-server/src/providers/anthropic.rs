@@ -85,6 +85,10 @@ impl ChatProvider for AnthropicProvider {
             body["top_p"] = Value::from(top_p);
         }
 
+        if let Some(stop) = _stop {
+            body["stop_sequences"] = serde_json::to_value(stop).unwrap_or(Value::Null);
+        }
+
         body
     }
 
