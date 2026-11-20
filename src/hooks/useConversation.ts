@@ -275,8 +275,9 @@ export function useConversation(
           ));
         }
         
-        // 应用正则替换
-        if (typeof event.raw_content === 'string' || typeof event.processed === 'string') {
+        // 应用正则替换：仅在尚未收到任何 token 时，才用 raw_content/processed 作为兜底。
+        // 已收到 token 时，以 token 累积为准，避免 raw_content 覆盖已累积的内容导致“只显示一个字符”。
+        if (!received && (typeof event.raw_content === 'string' || typeof event.processed === 'string')) {
           setMessages(rows => rows.map((m, i) => i === rows.length - 1
             ? { ...m, content: applyRegex(event.processed ?? event.raw_content ?? '', regexRef.current) } 
             : m
