@@ -39,7 +39,7 @@ fn default_temperature() -> f32 {
     0.0
 }
 fn default_max_tokens() -> u32 {
-    0
+    400
 }
 fn default_top_p() -> f32 {
     0.0
@@ -81,7 +81,7 @@ pub fn connection_settings(st: &ServerState) -> ConnectionSettings {
         summary_model: String::new(),
         num_gpu: None,
         temperature: 0.0,
-        max_tokens: 0,
+        max_tokens: 400,
         top_p: 0.0,
         frequency_penalty: 0.0,
         presence_penalty: 0.0,

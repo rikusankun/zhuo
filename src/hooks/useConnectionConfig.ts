@@ -11,7 +11,7 @@ const defaults: Connection = {
   summary_model: '',
   num_gpu: null,
   temperature: 0.0,
-  max_tokens: 0,
+  max_tokens: 400,
   top_p: 0.0,
   frequency_penalty: 0.0,
   presence_penalty: 0.0,
