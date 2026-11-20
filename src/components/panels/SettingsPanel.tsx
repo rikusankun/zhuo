@@ -26,6 +26,7 @@ const PROVIDERS: { id: string; name: string; baseUrl: string | null; defaultMode
   { id: 'anthropic', name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', defaultModel: 'claude-3-5-sonnet-20241022' },
   { id: 'google', name: 'Google', baseUrl: 'https://generativelanguage.googleapis.com/v1', defaultModel: 'gemini-1.5-pro' },
   { id: 'openrouter', name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', defaultModel: '' },
+  { id: 'demonroute', name: 'Demon Route', baseUrl: 'https://api.demonroute.com/v1', defaultModel: '' },
   { id: 'deepseek', name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', defaultModel: 'deepseek-chat' },
   { id: 'moonshot', name: 'Moonshot', baseUrl: 'https://api.moonshot.cn/v1', defaultModel: 'moonshot-v1' },
   { id: 'aliyun', name: '阿里云', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', defaultModel: 'qwen-turbo' },
